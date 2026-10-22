@@ -5,7 +5,7 @@ import { requireFields } from '../middleware/validate.js';
 
 const cookieOpts = {
   httpOnly: true,
-  sameSite: 'lax',
+  sameSite: 'none',
   secure: true,
   path: '/',
   maxAge: 8 * 60 * 60 * 1000,
