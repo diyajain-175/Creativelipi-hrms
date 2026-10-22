@@ -1,4 +1,4 @@
-const API_BASE_URL = 'https://creativelipi-hrms.onrender.com';
+const API_BASE_URL = 'https://creativelipi-hrms-api.onrender.com';
 
 async function request(path, { method = 'GET', body, headers } = {}) {
   const url = `${API_BASE_URL}${path}`;
