@@ -10,23 +10,18 @@ export function createApp() {
 
   app.disable('x-powered-by');
 
-  app.use(
-  cors({
-    origin(origin, callback) {
-      if (
-        !origin ||
-        /^http:\/\/localhost:\d+$/.test(origin) ||
-        origin === 'https://creativelipi-hrms-web.onrender.com'
-      ) {
-        callback(null, true);
-        return;
-      }
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'https://creativelipi-hrms-web.onrender.com',
+  ];
 
-      callback(null, false);
-    },
-    credentials: true,
-  })
-);
+  app.use(
+    cors({
+      origin: allowedOrigins,
+      credentials: true,
+    })
+  );
 
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
