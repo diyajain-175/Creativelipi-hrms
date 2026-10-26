@@ -32,12 +32,28 @@ router.get('/employees/me', wrap(async (req, res) => {
   res.json(profile.fullProfile(req.user, req.user.employeeId));
 }));
 
-router.get('/employees', requirePermission(P.EMPLOYEES_READ_TEAM, P.EMPLOYEES_READ_PROCESS, P.EMPLOYEES_READ_ALL), wrap(async (req, res) => {
-  res.json(employees.listEmployees(req.user, req.query));
-}));
+router.get(
+  '/employees',
+  requirePermission(
+    P.EMPLOYEES_READ_TEAM,
+    P.EMPLOYEES_READ_PROCESS,
+    P.EMPLOYEES_READ_ALL
+  ),
+  wrap(async (req, res) => {
+    res.json(
+      await employees.listEmployees(req.user, req.query)
+    );
+  })
+);
 
-router.post('/employees', requirePermission(P.EMPLOYEES_WRITE), wrap(async (req, res) => {
-  res.status(201).json(employees.createEmployee(req.user, req.body));
+router.patch('/employees/:id', requirePermission(P.EMPLOYEES_WRITE), wrap(async (req, res) => {
+  res.json(
+    await employees.updateEmployee(
+      req.user,
+      req.params.id,
+      req.body
+    )
+  );
 }));
 
 router.get('/employees/:id', wrap(async (req, res) => {
