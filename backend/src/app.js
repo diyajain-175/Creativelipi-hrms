@@ -20,7 +20,14 @@ export function createApp() {
 
   app.use(
     cors({
-      origin(origin, callback) {
+      origin: [
+        'http://localhost:5173',
+        'https://creativelipi-hrms-web.onrender.com',
+      ],
+      credentials: true,
+    })
+  );
+      ]
         if (!origin || allowedOrigins.includes(origin)) {
           callback(null, true);
           return;
