@@ -12,6 +12,7 @@ export function createApp() {
 
   const allowedOrigins = [
     'http://localhost:5173',
+    'http://localhost:5174',
     'https://creativelipi-hrms-web.onrender.com',
   ];
 
