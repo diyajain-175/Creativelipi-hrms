@@ -1,5 +1,4 @@
 import express from 'express';
-import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import { env } from './config/env.js';
 import routes from './routes/index.js';
@@ -16,24 +15,30 @@ export function createApp() {
     'https://creativelipi-hrms-web.onrender.com',
   ]);
 
-  const corsOptions = {
-    origin(origin, callback) {
-      if (!origin || allowedOrigins.has(origin)) {
-        callback(null, true);
-        return;
-      }
+  // CORS
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
 
-      callback(null, false);
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    optionsSuccessStatus: 204,
-  };
+    if (origin && allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader(
+        'Access-Control-Allow-Methods',
+        'GET,POST,PATCH,PUT,DELETE,OPTIONS'
+      );
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization'
+      );
+      res.setHeader('Vary', 'Origin');
+    }
 
-  app.use(cors(corsOptions));
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
 
-  app.options('*', cors(corsOptions));
+    next();
+  });
 
   app.use(express.json({ limit: '2mb' }));
   app.use(cookieParser());
