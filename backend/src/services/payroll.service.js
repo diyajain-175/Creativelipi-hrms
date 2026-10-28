@@ -27,7 +27,9 @@ export function listPayroll(user, query = {}) {
   if (!canViewSalary(user, user.employeeId) && user.role !== 'process_manager') {
     return payrollRepo.find((r) => r.employeeId === user.employeeId).map(withName);
   }
-  const ids = accessibleEmployeeIds(user);
+  const accessibleIds = accessibleEmployeeIds(user);
+  const ids = Array.isArray(accessibleIds) ? accessibleIds : [];
+  
   let rows = payrollRepo.find((r) => ids.includes(r.employeeId));
   if (query.employeeId) {
     assertEmployeeAccess(user, query.employeeId);
