@@ -32,7 +32,8 @@ function nameOf(id) {
 }
 
 function scoped(user, list, employeeKey = 'employeeId') {
-  const ids = accessibleEmployeeIds(user);
+  const accessibleIds = accessibleEmployeeIds(user);
+  const ids = Array.isArray(accessibleIds) ? accessibleIds : [];
   return list.filter((row) => ids.includes(row[employeeKey]));
 }
 
