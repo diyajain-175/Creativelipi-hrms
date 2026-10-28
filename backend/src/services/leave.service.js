@@ -24,7 +24,8 @@ function dayCount(start, end) {
 }
 
 export function listLeave(user, query = {}) {
-  const ids = accessibleEmployeeIds(user);
+const accessibleIds = accessibleEmployeeIds(user);
+const ids = Array.isArray(accessibleIds) ? accessibleIds : [];
   let rows = leaveRepo.find((r) => ids.includes(r.employeeId));
   if (query.employeeId) {
     assertEmployeeAccess(user, query.employeeId);
