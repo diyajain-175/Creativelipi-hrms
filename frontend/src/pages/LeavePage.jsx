@@ -19,7 +19,23 @@ export function LeavePage() {
   const [form, setForm] = useState({ leaveType: 'casual', startDate: '', endDate: '', reason: '' });
   const [msg, setMsg] = useState('');
 
-  const canDecide = ['team_leader', 'process_manager', 'hr_admin'].includes(user.role);
+    function canDecideRow(row) {
+    if (row.employeeId === user.employeeId) return false;
+
+    if (user.role === 'team_leader') {
+      return row.status === 'pending_team_leader';
+    }
+
+    if (user.role === 'process_manager') {
+      return ['pending_team_leader', 'pending_process_manager'].includes(row.status);
+    }
+
+    if (user.role === 'hr_admin') {
+      return ['pending_team_leader', 'pending_process_manager', 'pending_hr'].includes(row.status);
+    }
+
+    return false;
+  }
 
   async function apply(e) {
     e.preventDefault();
@@ -61,13 +77,15 @@ export function LeavePage() {
             { key: 'days', header: 'Days' },
             { key: 'reason', header: 'Reason' },
             { key: 'status', header: 'Status', render: (r) => <StatusBadge value={r.status} /> },
-            canDecide
-              ? {
-                  key: 'act',
-                  header: '',
-                  render: (r) => <DecisionButtons path={`/api/leave/${r.id}/decision`} onDone={list.reload} />,
-                }
-              : { key: 'decisionNote', header: 'Note' },
+            {
+              key: 'act',
+              header: 'Action / Note',
+              render: (r) => canDecideRow(r) ? (
+                <DecisionButtons path={`/api/leave/${r.id}/decision`} onDone={list.reload} />
+              ) : (
+                r.decisionNote || '-'
+              ),
+            },
           ]}
         />
       </div>

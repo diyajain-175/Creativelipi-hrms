@@ -1,28 +1,40 @@
-import { notificationRepo, userRepo } from '../repositories/index.js';
-import { nextId, nowIso } from '../utils/ids.js';
 
-export function notifyEmployee(employeeId, { title, body, module }) {
-  const user = userRepo.findByEmployeeId(employeeId);
+import { postgresNotificationRepo } from '../repositories/postgres/notification.repository.js';
+import { postgresUserRepo } from '../repositories/postgres/user.repository.js';
+
+export async function notifyEmployee(employeeId, { title, body, module }) {
+  const user = await postgresUserRepo.findByEmployeeId(employeeId);
+
   if (!user) return null;
-  return notificationRepo.insert({
-    id: nextId('NTF', notificationRepo.all()),
+
+  return postgresNotificationRepo.insert({
+    id: await postgresNotificationRepo.nextId(),
     userId: user.id,
     title,
     body,
     module,
     isRead: false,
-    createdAt: nowIso(),
   });
 }
 
-export function listNotifications(userId) {
-  return notificationRepo
-    .find((n) => n.userId === userId)
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+export async function listNotifications(userId) {
+  const notifications = await postgresNotificationRepo.find(
+    (item) => item.userId === userId
+  );
+
+  return notifications.sort(
+    (a, b) =>
+      new Date(b.createdAt).getTime() -
+      new Date(a.createdAt).getTime()
+  );
 }
 
-export function markRead(userId, id) {
-  const row = notificationRepo.findById(id);
-  if (!row || row.userId !== userId) return null;
-  return notificationRepo.update(id, { isRead: true });
+export async function markRead(userId, id) {
+  const notification = await postgresNotificationRepo.findById(id);
+
+  if (!notification || notification.userId !== userId) {
+    return null;
+  }
+
+  return postgresNotificationRepo.update(id, { isRead: true });
 }

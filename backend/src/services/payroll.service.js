@@ -1,100 +1,214 @@
-import { payrollRepo, incentiveRepo, penaltyRepo, employeeRepo, getSettings } from '../repositories/index.js';
-import { accessibleEmployeeIds, assertEmployeeAccess, canViewSalary } from './scope.service.js';
+
+import { postgresPayrollRepo } from '../repositories/postgres/payroll.repository.js';
+import { postgresEmployeeRepo } from '../repositories/postgres/employee.repository.js';
+import { postgresIncentiveRepo } from '../repositories/postgres/incentive.repository.js';
+import { postgresPenaltyRepo } from '../repositories/postgres/penalty.repository.js';
+import {
+  accessibleEmployeeIds,
+  assertEmployeeAccess,
+  canViewSalary,
+} from './scope.service.js';
 import { forbidden, notFound } from '../utils/errors.js';
-import { nextId, nowIso } from '../utils/ids.js';
 import { writeAudit } from './audit.service.js';
 import { notifyEmployee } from './notification.service.js';
 import { INCENTIVE_STATUS } from '../config/workflows.js';
 
-export function computeNet({ basic, allowances, incentives, bonus, deductions, penalties }) {
-  return Number(basic) + Number(allowances) + Number(incentives) + Number(bonus) - Number(deductions) - Number(penalties);
+export function computeNet({
+  basic,
+  allowances,
+  incentives,
+  bonus,
+  deductions,
+  penalties,
+}) {
+  return (
+    Number(basic) +
+    Number(allowances) +
+    Number(incentives) +
+    Number(bonus) -
+    Number(deductions) -
+    Number(penalties)
+  );
 }
 
 export function formulaText() {
-  return getSettings().payrollFormula.net;
+  return 'Basic + Allowances + Incentives + Bonus - Deductions - Penalties';
 }
 
-function withName(row) {
-  const e = employeeRepo.findById(row.employeeId);
+async function withName(row) {
+  const employee = await postgresEmployeeRepo.findById(row.employeeId);
+
   return {
     ...row,
-    employeeName: e ? `${e.firstName} ${e.lastName}` : row.employeeId,
+    employeeName: employee
+      ? `${employee.firstName} ${employee.lastName}`
+      : row.employeeId,
     formula: formulaText(),
   };
 }
 
-export function listPayroll(user, query = {}) {
-  if (!canViewSalary(user, user.employeeId) && user.role !== 'process_manager') {
-    return payrollRepo.find((r) => r.employeeId === user.employeeId).map(withName);
+export async function listPayroll(user, query = {}) {
+  const ids = await accessibleEmployeeIds(user);
+  let rows = await postgresPayrollRepo.find((row) =>
+    ids.includes(row.employeeId)
+  );
+
+  const visibleRows = [];
+
+  for (const row of rows) {
+    if (await canViewSalary(user, row.employeeId)) {
+      visibleRows.push(row);
+    }
   }
-  const accessibleIds = accessibleEmployeeIds(user);
-  const ids = Array.isArray(accessibleIds) ? accessibleIds : [];
-  
-  let rows = payrollRepo.find((r) => ids.includes(r.employeeId));
+
   if (query.employeeId) {
-    assertEmployeeAccess(user, query.employeeId);
-    if (!canViewSalary(user, query.employeeId) && query.employeeId !== user.employeeId) throw forbidden();
-    rows = rows.filter((r) => r.employeeId === query.employeeId);
+    await assertEmployeeAccess(user, query.employeeId);
+
+    if (!(await canViewSalary(user, query.employeeId))) {
+      throw forbidden('You cannot view this payroll.');
+    }
+
+    rows = visibleRows.filter(
+      (row) => row.employeeId === query.employeeId
+    );
+  } else {
+    rows = visibleRows;
   }
-  if (query.period) rows = rows.filter((r) => r.period === query.period);
-  return rows.map(withName).sort((a, b) => b.period.localeCompare(a.period));
+
+  if (query.period) {
+    rows = rows.filter((row) => row.period === query.period);
+  }
+
+  const result = await Promise.all(rows.map(withName));
+
+  return result.sort((a, b) => b.period.localeCompare(a.period));
 }
 
-export function getPayrollForEmployee(user, employeeId) {
-  assertEmployeeAccess(user, employeeId);
-  if (!canViewSalary(user, employeeId)) throw forbidden('You cannot view this payroll.');
-  return payrollRepo.find((r) => r.employeeId === employeeId).map(withName);
+export async function getPayrollForEmployee(user, employeeId) {
+  await assertEmployeeAccess(user, employeeId);
+
+  if (!(await canViewSalary(user, employeeId))) {
+    throw forbidden('You cannot view this payroll.');
+  }
+
+  const rows = await postgresPayrollRepo.find(
+    (row) => row.employeeId === employeeId
+  );
+
+  return Promise.all(rows.map(withName));
 }
 
-export function generatePayroll(actor, period) {
-  const month = period || nowIso().slice(0, 7);
-  const created = [];
-  for (const emp of employeeRepo.all().filter((e) => e.employmentStatus === 'active')) {
-    const existing = payrollRepo.findOne((r) => r.employeeId === emp.id && r.period === month);
-    if (existing && existing.status === 'paid') continue;
-    const incentives = incentiveRepo
-      .find((i) => i.employeeId === emp.id && i.period === month && i.status === INCENTIVE_STATUS.APPROVED)
-      .reduce((sum, i) => sum + Number(i.amount), 0);
-    const penalties = penaltyRepo
-      .find((p) => p.employeeId === emp.id && p.period === month && p.status === 'approved')
-      .reduce((sum, p) => sum + Number(p.amount), 0);
-    const deductions = Math.round(emp.basicSalary * 0.04);
+export async function generatePayroll(actor, period) {
+  const month = period || new Date().toISOString().slice(0, 7);
+  const employees = await postgresEmployeeRepo.all();
+  const incentivesList = await postgresIncentiveRepo.all();
+  const penaltiesList = await postgresPenaltyRepo.all();
+
+  let count = 0;
+
+  for (const employee of employees) {
+    if (employee.employmentStatus !== 'active') continue;
+
+    const existing = await postgresPayrollRepo.findOne(
+      (row) =>
+        row.employeeId === employee.id &&
+        row.period === month
+    );
+
+    if (existing?.status === 'paid') continue;
+
+    const incentives = incentivesList
+      .filter(
+        (item) =>
+          item.employeeId === employee.id &&
+          item.period === month &&
+          item.status === INCENTIVE_STATUS.APPROVED
+      )
+      .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+
+    const penalties = penaltiesList
+      .filter(
+        (item) =>
+          item.employeeId === employee.id &&
+          item.period === month &&
+          item.status === 'approved'
+      )
+      .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+
+    const basic = Number(employee.basicSalary || 0);
+    const allowances = Number(employee.allowances || 0);
+    const deductions = Math.round(basic * 0.04);
+
     const payload = {
-      employeeId: emp.id,
+      employeeId: employee.id,
       period: month,
-      basic: emp.basicSalary,
-      allowances: emp.allowances,
+      basic,
+      allowances,
       incentives,
       bonus: 0,
       deductions,
       penalties,
       net: computeNet({
-        basic: emp.basicSalary,
-        allowances: emp.allowances,
+        basic,
+        allowances,
         incentives,
         bonus: 0,
         deductions,
         penalties,
       }),
       status: 'processed',
-      createdAt: nowIso(),
     };
-    if (existing) created.push(payrollRepo.update(existing.id, payload));
-    else created.push(payrollRepo.insert({ id: nextId('PAY', payrollRepo.all()), ...payload }));
+
+    if (existing) {
+      await postgresPayrollRepo.update(existing.id, payload);
+    } else {
+      await postgresPayrollRepo.insert({
+        id: await postgresPayrollRepo.nextId(),
+        ...payload,
+      });
+    }
+
+    count += 1;
   }
-  writeAudit({ userId: actor.id, action: 'payroll.generated', module: 'payroll', recordId: month, meta: { count: created.length } });
-  return { period: month, count: created.length, formula: formulaText() };
+
+  await writeAudit({
+    userId: actor.id,
+    action: 'payroll.generated',
+    module: 'payroll',
+    recordId: month,
+    meta: { count },
+  });
+
+  return {
+    period: month,
+    count,
+    formula: formulaText(),
+  };
 }
 
-export function markPaid(actor, id) {
-  const row = payrollRepo.findById(id);
-  if (!row) throw notFound('Payroll record not found.');
-  const updated = payrollRepo.update(id, { status: 'paid' });
-  writeAudit({ userId: actor.id, action: 'payroll.changed', module: 'payroll', recordId: id });
-  notifyEmployee(row.employeeId, {
+export async function markPaid(actor, id) {
+  const row = await postgresPayrollRepo.findById(id);
+
+  if (!row) {
+    throw notFound('Payroll record not found.');
+  }
+
+  const updated = await postgresPayrollRepo.update(id, {
+    status: 'paid',
+  });
+
+  await writeAudit({
+    userId: actor.id,
+    action: 'payroll.changed',
+    module: 'payroll',
+    recordId: id,
+  });
+
+  await notifyEmployee(row.employeeId, {
     title: 'Payslip ready',
     body: `Payroll for ${row.period} has been marked paid.`,
     module: 'payroll',
   });
+
   return withName(updated);
 }

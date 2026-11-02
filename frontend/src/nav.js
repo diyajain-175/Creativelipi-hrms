@@ -9,6 +9,7 @@ export const NAV = {
     { to: '/reimbursements', label: 'Reimbursements' },
     { to: '/recognition', label: 'Recognition' },
     { to: '/learning', label: 'Learning' },
+    { to: '/performance', label: 'Performance' },
   ],
   team_leader: [
     { to: '/', label: 'Dashboard' },
@@ -19,6 +20,8 @@ export const NAV = {
     { to: '/recognition', label: 'Recognition' },
     { to: '/learning', label: 'Learning' },
     { to: '/incentives', label: 'Incentives' },
+    { to: '/reimbursements', label: 'Reimbursements' },
+    { to: '/assets', label: 'IT Assets' },
   ],
   process_manager: [
     { to: '/', label: 'Dashboard' },
@@ -30,6 +33,8 @@ export const NAV = {
     { to: '/incentives', label: 'Incentives' },
     { to: '/reimbursements', label: 'Reimbursements' },
     { to: '/recognition', label: 'Recognition' },
+    { to: '/assets', label: 'IT Assets' },
+    { to: '/learning', label: 'Learning' },
   ],
   hr_admin: [
     { to: '/', label: 'Dashboard' },
@@ -44,6 +49,8 @@ export const NAV = {
     { to: '/learning', label: 'Learning' },
     { to: '/settings', label: 'Settings' },
     { to: '/reports', label: 'Reports' },
+    { to: '/assets', label: 'IT Assets' },
+    { to: '/incentives', label: 'Incentives' },
   ],
   finance: [
     { to: '/', label: 'Dashboard' },

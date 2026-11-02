@@ -8,6 +8,9 @@ const { Client } = pg;
 
 const client = new Client({
   connectionString: process.env.DATABASE_URL,
+  ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL || '')
+  ? false
+  : { rejectUnauthorized: false },
 });
 
 const departments = [

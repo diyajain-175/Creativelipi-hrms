@@ -10,15 +10,40 @@ function mapUser(row) {
     role: row.role,
     employeeId: row.employee_id,
     isActive: row.is_active,
+    createdAt: row.created_at,
   };
 }
 
 export const postgresUserRepo = {
+  async all() {
+    const pool = getPool();
+
+    const { rows } = await pool.query(`
+      SELECT *
+      FROM users
+      ORDER BY created_at DESC
+    `);
+
+    return rows.map(mapUser);
+  },
+
+  async findById(id) {
+    const pool = getPool();
+
+    const { rows } = await pool.query(
+      `SELECT * FROM users WHERE id = $1 LIMIT 1`,
+      [id]
+    );
+
+    return mapUser(rows[0]);
+  },
+
   async findByEmail(email) {
     const pool = getPool();
 
     const { rows } = await pool.query(
-      `SELECT * FROM users
+      `SELECT *
+       FROM users
        WHERE LOWER(email) = LOWER($1)
        LIMIT 1`,
       [email]
@@ -31,13 +56,24 @@ export const postgresUserRepo = {
     const pool = getPool();
 
     const { rows } = await pool.query(
-      `SELECT * FROM users
+      `SELECT *
+       FROM users
        WHERE employee_id = $1
        LIMIT 1`,
       [employeeId]
     );
 
     return mapUser(rows[0]);
+  },
+
+  async findOne(predicate) {
+    const rows = await this.all();
+    return rows.find(predicate) || null;
+  },
+
+  async find(predicate) {
+    const rows = await this.all();
+    return rows.filter(predicate);
   },
 
   async insert(user) {
@@ -60,7 +96,7 @@ export const postgresUserRepo = {
         user.passwordHash,
         user.role,
         user.employeeId,
-        user.isActive,
+        user.isActive ?? true,
       ]
     );
 
@@ -68,21 +104,28 @@ export const postgresUserRepo = {
   },
 
   async update(id, patch) {
-    const fields = [];
+    const allowedFields = {
+      email: 'email',
+      passwordHash: 'password_hash',
+      role: 'role',
+      employeeId: 'employee_id',
+      isActive: 'is_active',
+    };
+
+    const updates = [];
     const values = [];
 
-    if (patch.role !== undefined) {
-      fields.push(`role = $${values.length + 1}`);
-      values.push(patch.role);
+    for (const [key, value] of Object.entries(patch)) {
+      const column = allowedFields[key];
+
+      if (!column) continue;
+
+      updates.push(`${column} = $${values.length + 1}`);
+      values.push(value);
     }
 
-    if (patch.isActive !== undefined) {
-      fields.push(`is_active = $${values.length + 1}`);
-      values.push(patch.isActive);
-    }
-
-    if (!fields.length) {
-      return this.findByEmployeeId(id);
+    if (!updates.length) {
+      return this.findById(id);
     }
 
     values.push(id);
@@ -91,7 +134,7 @@ export const postgresUserRepo = {
 
     const { rows } = await pool.query(
       `UPDATE users
-       SET ${fields.join(', ')}
+       SET ${updates.join(', ')}
        WHERE id = $${values.length}
        RETURNING *`,
       values

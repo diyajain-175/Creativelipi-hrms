@@ -1,126 +1,211 @@
-import { attendanceRepo, employeeRepo } from '../repositories/index.js';
-import { getSettings } from '../repositories/index.js';
+
+import { postgresAttendanceRepo } from '../repositories/postgres/attendance.repository.js';
+import { postgresEmployeeRepo } from '../repositories/postgres/employee.repository.js';
 import { accessibleEmployeeIds, assertEmployeeAccess } from './scope.service.js';
 import { conflict, badRequest } from '../utils/errors.js';
-import { nextId, todayIso, nowIso } from '../utils/ids.js';
+import { todayIso } from '../utils/ids.js';
 import { writeAudit } from './audit.service.js';
+
+const LATE_AFTER = '09:15';
+const FULL_DAY_MINUTES = 480;
 
 function minutesBetween(start, end) {
   if (!start || !end) return 0;
+
   const [sh, sm] = start.split(':').map(Number);
   const [eh, em] = end.split(':').map(Number);
-  return eh * 60 + em - (sh * 60 + sm);
+
+  return Math.max(0, eh * 60 + em - (sh * 60 + sm));
 }
 
 function currentTime() {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const date = new Date();
+
+  return `${String(date.getHours()).padStart(2, '0')}:${String(
+    date.getMinutes()
+  ).padStart(2, '0')}`;
 }
 
 function classifyStatus(checkIn) {
-  const lateAfter = getSettings().lateAfter || '09:15';
-  return checkIn > lateAfter ? 'late' : 'present';
+  return checkIn > LATE_AFTER ? 'late' : 'present';
 }
 
-export function listAttendance(user, query = {}) {
-  const ids = accessibleEmployeeIds(user);
-  let rows = attendanceRepo.find((r) => ids.includes(r.employeeId));
-  if (query.employeeId) {
-    assertEmployeeAccess(user, query.employeeId);
-    rows = rows.filter((r) => r.employeeId === query.employeeId);
-  }
-  if (query.from) rows = rows.filter((r) => r.workDate >= query.from);
-  if (query.to) rows = rows.filter((r) => r.workDate <= query.to);
-  return rows
-    .map(withName)
-    .sort((a, b) => b.workDate.localeCompare(a.workDate) || a.employeeId.localeCompare(b.employeeId));
-}
+async function withName(row) {
+  if (!row) return null;
 
-function withName(row) {
-  const e = employeeRepo.findById(row.employeeId);
+  const employee = await postgresEmployeeRepo.findById(row.employeeId);
+
   return {
     ...row,
-    employeeName: e ? `${e.firstName} ${e.lastName}` : row.employeeId,
-    employeeCode: e?.employeeCode,
+    employeeName: employee
+      ? `${employee.firstName} ${employee.lastName}`
+      : row.employeeId,
+    employeeCode: employee?.employeeCode,
   };
 }
 
-export function todayAttendance(employeeId) {
-  const date = todayIso();
-  return attendanceRepo.findOne((r) => r.employeeId === employeeId && r.workDate === date);
+export async function listAttendance(user, query = {}) {
+  const ids = await accessibleEmployeeIds(user);
+
+  let rows = await postgresAttendanceRepo.find((row) =>
+    ids.includes(row.employeeId)
+  );
+
+  if (query.employeeId) {
+    await assertEmployeeAccess(user, query.employeeId);
+    rows = rows.filter((row) => row.employeeId === query.employeeId);
+  }
+
+  if (query.from) {
+    rows = rows.filter((row) => row.workDate >= query.from);
+  }
+
+  if (query.to) {
+    rows = rows.filter((row) => row.workDate <= query.to);
+  }
+
+  const result = await Promise.all(rows.map(withName));
+
+  return result.sort(
+    (a, b) =>
+      b.workDate.localeCompare(a.workDate) ||
+      a.employeeId.localeCompare(b.employeeId)
+  );
 }
 
-export function checkIn(user) {
+export async function todayAttendance(employeeId) {
   const date = todayIso();
-  const existing = todayAttendance(user.employeeId);
-  if (existing?.checkIn) throw conflict('You have already checked in today.');
-  const time = currentTime();
-  if (existing) {
-    return withName(attendanceRepo.update(existing.id, { checkIn: time, status: classifyStatus(time) }));
+
+  return postgresAttendanceRepo.findOne(
+    (row) =>
+      row.employeeId === employeeId &&
+      row.workDate === date
+  );
+}
+
+export async function checkIn(user) {
+  const date = todayIso();
+  const existing = await todayAttendance(user.employeeId);
+
+  if (existing?.checkIn) {
+    throw conflict('You have already checked in today.');
   }
-  const row = attendanceRepo.insert({
-    id: nextId('ATT', attendanceRepo.all()),
-    employeeId: user.employeeId,
-    workDate: date,
-    checkIn: time,
-    checkOut: null,
-    status: classifyStatus(time),
-    workingMinutes: 0,
-    overtimeMinutes: 0,
-    source: 'manual',
+
+  const time = currentTime();
+
+  const row = existing
+    ? await postgresAttendanceRepo.update(existing.id, {
+        checkIn: time,
+        status: classifyStatus(time),
+      })
+    : await postgresAttendanceRepo.insert({
+        id: await postgresAttendanceRepo.nextId(),
+        employeeId: user.employeeId,
+        workDate: date,
+        checkIn: time,
+        checkOut: null,
+        status: classifyStatus(time),
+        workingMinutes: 0,
+        overtimeMinutes: 0,
+        source: 'manual',
+      });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'attendance.check_in',
+    module: 'attendance',
+    recordId: row.id,
   });
-  writeAudit({ userId: user.id, action: 'attendance.check_in', module: 'attendance', recordId: row.id });
+
   return withName(row);
 }
 
-export function checkOut(user) {
-  const existing = todayAttendance(user.employeeId);
-  if (!existing?.checkIn) throw conflict('Check in before checking out.');
-  if (existing.checkOut) throw conflict('You have already checked out today.');
+export async function checkOut(user) {
+  const existing = await todayAttendance(user.employeeId);
+
+  if (!existing?.checkIn) {
+    throw conflict('Check in before checking out.');
+  }
+
+  if (existing.checkOut) {
+    throw conflict('You have already checked out today.');
+  }
+
   const time = currentTime();
   const workingMinutes = minutesBetween(existing.checkIn, time);
-  const fullDay = getSettings().fullDayMinutes || 480;
-  const overtimeMinutes = Math.max(0, workingMinutes - fullDay);
-  const updated = attendanceRepo.update(existing.id, { checkOut: time, workingMinutes, overtimeMinutes });
-  writeAudit({ userId: user.id, action: 'attendance.check_out', module: 'attendance', recordId: existing.id });
+  const overtimeMinutes = Math.max(
+    0,
+    workingMinutes - FULL_DAY_MINUTES
+  );
+
+  const updated = await postgresAttendanceRepo.update(existing.id, {
+    checkOut: time,
+    workingMinutes,
+    overtimeMinutes,
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'attendance.check_out',
+    module: 'attendance',
+    recordId: existing.id,
+  });
+
   return withName(updated);
 }
 
-export function importRows(user, rows) {
-  if (!Array.isArray(rows) || !rows.length) throw badRequest('No attendance rows to import.');
-  const imported = [];
+export async function importRows(user, rows) {
+  if (!Array.isArray(rows) || !rows.length) {
+    throw badRequest('No attendance rows to import.');
+  }
+
+  let imported = 0;
+
   for (const row of rows) {
     if (!row.employeeId || !row.date) continue;
-    const employee = employeeRepo.findById(row.employeeId);
+
+    const employee = await postgresEmployeeRepo.findById(row.employeeId);
+
     if (!employee) continue;
-    const existing = attendanceRepo.findOne((r) => r.employeeId === row.employeeId && r.workDate === row.date);
+
+    const existing = await postgresAttendanceRepo.findOne(
+      (item) =>
+        item.employeeId === row.employeeId &&
+        item.workDate === row.date
+    );
+
     const payload = {
       employeeId: row.employeeId,
       workDate: row.date,
       checkIn: row.checkIn || null,
       checkOut: row.checkOut || null,
-      status: row.status || (row.checkIn ? classifyStatus(row.checkIn) : 'absent'),
+      status:
+        row.status ||
+        (row.checkIn ? classifyStatus(row.checkIn) : 'absent'),
       workingMinutes: minutesBetween(row.checkIn, row.checkOut),
       overtimeMinutes: 0,
       source: 'import',
     };
+
     if (existing) {
-      imported.push(attendanceRepo.update(existing.id, payload));
+      await postgresAttendanceRepo.update(existing.id, payload);
     } else {
-      imported.push(
-        attendanceRepo.insert({
-          id: nextId('ATT', attendanceRepo.all()),
-          ...payload,
-        })
-      );
+      await postgresAttendanceRepo.insert({
+        id: await postgresAttendanceRepo.nextId(),
+        ...payload,
+      });
     }
+
+    imported += 1;
   }
-  writeAudit({
+
+  await writeAudit({
     userId: user.id,
     action: 'attendance.imported',
     module: 'attendance',
-    recordId: nowIso(),
-    meta: { count: imported.length },
+    recordId: null,
+    meta: { count: imported },
   });
-  return { imported: imported.length };
+
+  return { imported };
 }

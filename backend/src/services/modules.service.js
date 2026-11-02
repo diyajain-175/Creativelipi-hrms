@@ -1,102 +1,204 @@
+import { postgresIncentiveRepo } from '../repositories/postgres/incentive.repository.js';
+import { postgresRewardRepo } from '../repositories/postgres/reward.repository.js';
+import { postgresPenaltyRepo } from '../repositories/postgres/penalty.repository.js';
+import { postgresGoalRepo } from '../repositories/postgres/goal.repository.js';
+import { postgresReviewRepo } from '../repositories/postgres/review.repository.js';
+import { postgresAssetRepo } from '../repositories/postgres/asset.repository.js';
+import { postgresAssetAssignmentRepo } from '../repositories/postgres/asset-assignment.repository.js';
+import { postgresAssetRequestRepo } from '../repositories/postgres/asset-request.repository.js';
+import { postgresGrievanceRepo } from '../repositories/postgres/grievance.repository.js';
+import { postgresGrievanceCommentRepo } from '../repositories/postgres/grievance-comment.repository.js';
+import { postgresReimbursementRepo } from '../repositories/postgres/reimbursement.repository.js';
+import { postgresCourseRepo } from '../repositories/postgres/course.repository.js';
+import { postgresEmployeeCourseRepo } from '../repositories/postgres/employee-course.repository.js';
+import { postgresEmployeeRepo } from '../repositories/postgres/employee.repository.js';
+import { postgresDepartmentRepo } from '../repositories/postgres/department.repository.js';
+import { postgresDesignationRepo } from '../repositories/postgres/designation.repository.js';
+
 import {
-  incentiveRepo,
-  rewardRepo,
-  penaltyRepo,
-  goalRepo,
-  reviewRepo,
-  assetRepo,
-  assetAssignmentRepo,
-  assetRequestRepo,
-  grievanceRepo,
-  grievanceCommentRepo,
-  reimbursementRepo,
-  courseRepo,
-  employeeCourseRepo,
-  employeeRepo,
-  departmentRepo,
-  designationRepo,
-} from '../repositories/index.js';
-import { INCENTIVE_STATUS, REIMBURSE_STATUS, ASSET_REQUEST_STATUS } from '../config/workflows.js';
+  INCENTIVE_STATUS,
+  REIMBURSE_STATUS,
+  ASSET_REQUEST_STATUS,
+} from '../config/workflows.js';
+
 import { ROLES } from '../config/roles.js';
 import { accessibleEmployeeIds, assertEmployeeAccess } from './scope.service.js';
 import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
 import { requireFields } from '../middleware/validate.js';
-import { nextId, nowIso } from '../utils/ids.js';
 import { writeAudit } from './audit.service.js';
 import { notifyEmployee } from './notification.service.js';
 import { getSettings, updateSettings } from '../repositories/index.js';
+import { nextStatusAfterApproval } from './approval.service.js';
 
-function nameOf(id) {
-  const e = employeeRepo.findById(id);
-  return e ? `${e.firstName} ${e.lastName}` : id;
+const nowIso = () => new Date().toISOString();
+
+async function nameOf(id) {
+  if (!id) return '';
+  const employee = await postgresEmployeeRepo.findById(id);
+
+  return employee
+    ? `${employee.firstName} ${employee.lastName}`.trim()
+    : id;
 }
 
-function scoped(user, list, employeeKey = 'employeeId') {
-  const accessibleIds = accessibleEmployeeIds(user);
-  const ids = Array.isArray(accessibleIds) ? accessibleIds : [];
-  return list.filter((row) => ids.includes(row[employeeKey]));
+async function scoped(user, rows, employeeKey = 'employeeId') {
+  const ids = await accessibleEmployeeIds(user);
+  return rows.filter((row) => ids.includes(row[employeeKey]));
 }
 
-export function listIncentives(user) {
-  return scoped(user, incentiveRepo.all()).map((r) => ({ ...r, employeeName: nameOf(r.employeeId) }));
+async function withEmployeeName(row) {
+  return {
+    ...row,
+    employeeName: await nameOf(row.employeeId),
+  };
 }
 
-export function recommendIncentive(user, body) {
+function makeId(prefix, id) {
+  return `${prefix}-${id}`;
+}
+
+// Incentives
+
+export async function listIncentives(user) {
+  const rows = await postgresIncentiveRepo.all();
+  const visible = await scoped(user, rows);
+
+  return Promise.all(
+    visible.map(async (row) => ({
+      ...(await withEmployeeName(row)),
+      recommendedByName: await nameOf(row.recommendedBy),
+      approvedByName: await nameOf(row.approvedBy),
+    }))
+  );
+}
+
+export async function recommendIncentive(user, body) {
   requireFields(body, ['employeeId', 'ruleCode', 'amount', 'reason', 'period']);
-  assertEmployeeAccess(user, body.employeeId);
-  if (![ROLES.TEAM_LEADER, ROLES.PROCESS_MANAGER, ROLES.HR_ADMIN].includes(user.role)) throw forbidden();
-  const row = incentiveRepo.insert({
-    id: nextId('INC', incentiveRepo.all()),
+  await assertEmployeeAccess(user, body.employeeId);
+
+  if (body.employeeId === user.employeeId) {
+    throw forbidden('You cannot recommend an incentive for yourself.');
+  }
+
+  const amount = Number(body.amount);
+
+  if (!(amount > 0)) {
+    throw badRequest('Amount must be greater than zero.');
+  }
+
+  const status = {
+    [ROLES.TEAM_LEADER]: INCENTIVE_STATUS.PENDING_PM,
+    [ROLES.PROCESS_MANAGER]: INCENTIVE_STATUS.PENDING_HR,
+    [ROLES.HR_ADMIN]: INCENTIVE_STATUS.APPROVED,
+  }[user.role];
+
+  if (!status) throw forbidden();
+
+  const row = await postgresIncentiveRepo.insert({
+    id: await postgresIncentiveRepo.nextId(),
     employeeId: body.employeeId,
     ruleCode: body.ruleCode,
-    amount: Number(body.amount),
+    amount,
     points: Number(body.points || 0),
     reason: body.reason,
     period: body.period,
     recommendedBy: user.employeeId,
-    approvedBy: null,
-    status: user.role === ROLES.HR_ADMIN ? INCENTIVE_STATUS.APPROVED : INCENTIVE_STATUS.PENDING_PM,
+    approvedBy: user.role === ROLES.HR_ADMIN ? user.employeeId : null,
+    status,
     createdAt: nowIso(),
   });
-  writeAudit({ userId: user.id, action: 'incentive.recommended', module: 'incentives', recordId: row.id });
-  return { ...row, employeeName: nameOf(row.employeeId) };
+
+  await writeAudit({
+    userId: user.id,
+    action: 'incentive.recommended',
+    module: 'incentives',
+    recordId: row.id,
+  });
+
+  return withEmployeeName(row);
 }
 
-export function decideIncentive(user, id, { decision, note }) {
-  const row = incentiveRepo.findById(id);
+export async function decideIncentive(user, id, { decision, note }) {
+  const row = await postgresIncentiveRepo.findById(id);
   if (!row) throw notFound('Incentive not found.');
-  if (user.role === ROLES.PROCESS_MANAGER && row.status !== INCENTIVE_STATUS.PENDING_PM) {
-    throw conflict('This request is not waiting for you.');
+
+  if (!['approve', 'reject'].includes(decision)) {
+    throw badRequest('Decision must be approve or reject.');
   }
-  if (user.role === ROLES.HR_ADMIN && ![INCENTIVE_STATUS.PENDING_PM, INCENTIVE_STATUS.PENDING_HR].includes(row.status)) {
-    throw conflict('This request is not waiting for you.');
+
+  const employee = await postgresEmployeeRepo.findById(row.employeeId);
+  if (!employee) throw notFound('Employee not found.');
+
+  if (employee.id === user.employeeId) {
+    throw forbidden('You cannot decide your own incentive.');
   }
-  if (![ROLES.PROCESS_MANAGER, ROLES.HR_ADMIN].includes(user.role)) throw forbidden();
-  const status = decision === 'approve' ? INCENTIVE_STATUS.APPROVED : INCENTIVE_STATUS.REJECTED;
-  const updated = incentiveRepo.update(id, { status, approvedBy: user.employeeId });
-  writeAudit({
+
+  if (user.role === ROLES.PROCESS_MANAGER) {
+    if (row.status !== INCENTIVE_STATUS.PENDING_PM) {
+      throw conflict('This request is not waiting for you.');
+    }
+
+    if (employee.processManagerId !== user.employeeId) {
+      throw forbidden();
+    }
+  } else if (user.role === ROLES.HR_ADMIN) {
+    if (
+      ![INCENTIVE_STATUS.PENDING_PM, INCENTIVE_STATUS.PENDING_HR].includes(row.status)
+    ) {
+      throw conflict('This request is not waiting for you.');
+    }
+  } else {
+    throw forbidden();
+  }
+
+  const status = decision === 'approve'
+    ? INCENTIVE_STATUS.APPROVED
+    : INCENTIVE_STATUS.REJECTED;
+
+  const updated = await postgresIncentiveRepo.update(id, {
+    status,
+    approvedBy: user.employeeId,
+  });
+
+  await writeAudit({
     userId: user.id,
-    action: status === INCENTIVE_STATUS.APPROVED ? 'incentive.approved' : 'incentive.rejected',
+    action: status === INCENTIVE_STATUS.APPROVED
+      ? 'incentive.approved'
+      : 'incentive.rejected',
     module: 'incentives',
     recordId: id,
     meta: { note },
   });
-  notifyEmployee(row.employeeId, {
+
+  await notifyEmployee(row.employeeId, {
     title: 'Incentive update',
     body: `Incentive ${status.replaceAll('_', ' ')}.`,
     module: 'incentives',
   });
-  return { ...updated, employeeName: nameOf(updated.employeeId) };
+
+  return withEmployeeName(updated);
 }
 
-export function listRewards(user) {
-  return scoped(user, rewardRepo.all()).map((r) => ({ ...r, employeeName: nameOf(r.employeeId) }));
+// Rewards
+
+export async function listRewards(user) {
+  const rows = await postgresRewardRepo.all();
+  const visible = await scoped(user, rows);
+
+  return Promise.all(
+    visible.map(async (row) => ({
+      ...(await withEmployeeName(row)),
+      awardedByName: await nameOf(row.awardedBy),
+    }))
+  );
 }
 
-export function createReward(user, body) {
+export async function createReward(user, body) {
   requireFields(body, ['employeeId', 'title', 'category']);
-  const row = rewardRepo.insert({
-    id: nextId('RWD', rewardRepo.all()),
+  await assertEmployeeAccess(user, body.employeeId);
+
+  const row = await postgresRewardRepo.insert({
+    id: await postgresRewardRepo.nextId(),
     employeeId: body.employeeId,
     title: body.title,
     category: body.category,
@@ -105,19 +207,38 @@ export function createReward(user, body) {
     awardedBy: user.employeeId,
     createdAt: nowIso(),
   });
-  notifyEmployee(body.employeeId, { title: 'You were recognized', body: body.title, module: 'rewards' });
-  writeAudit({ userId: user.id, action: 'reward.created', module: 'rewards', recordId: row.id });
-  return { ...row, employeeName: nameOf(row.employeeId) };
+
+  await notifyEmployee(body.employeeId, {
+    title: 'You were recognized',
+    body: body.title,
+    module: 'rewards',
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'reward.created',
+    module: 'rewards',
+    recordId: row.id,
+  });
+
+  return withEmployeeName(row);
 }
 
-export function listPenalties(user) {
-  return scoped(user, penaltyRepo.all()).map((r) => ({ ...r, employeeName: nameOf(r.employeeId) }));
+// Penalties
+
+export async function listPenalties(user) {
+  const rows = await postgresPenaltyRepo.all();
+  const visible = await scoped(user, rows);
+
+  return Promise.all(visible.map(withEmployeeName));
 }
 
-export function createPenalty(user, body) {
+export async function createPenalty(user, body) {
   requireFields(body, ['employeeId', 'reason', 'amount', 'penaltyDate', 'period']);
-  const row = penaltyRepo.insert({
-    id: nextId('PEN', penaltyRepo.all()),
+  await assertEmployeeAccess(user, body.employeeId);
+
+  const row = await postgresPenaltyRepo.insert({
+    id: await postgresPenaltyRepo.nextId(),
     employeeId: body.employeeId,
     reason: body.reason,
     amount: Number(body.amount),
@@ -127,76 +248,266 @@ export function createPenalty(user, body) {
     status: 'pending',
     createdAt: nowIso(),
   });
-  writeAudit({ userId: user.id, action: 'penalty.created', module: 'penalties', recordId: row.id });
-  return { ...row, employeeName: nameOf(row.employeeId) };
-}
 
-export function decidePenalty(user, id, { decision }) {
-  const row = penaltyRepo.findById(id);
-  if (!row) throw notFound('Penalty not found.');
-  const status = decision === 'approve' ? 'approved' : 'rejected';
-  const updated = penaltyRepo.update(id, { status });
-  writeAudit({ userId: user.id, action: `penalty.${status}`, module: 'penalties', recordId: id });
-  return { ...updated, employeeName: nameOf(updated.employeeId) };
-}
-
-export function listGoals(user, employeeId) {
-  const id = employeeId || user.employeeId;
-  assertEmployeeAccess(user, id);
-  return goalRepo.find((g) => g.employeeId === id);
-}
-
-export function listReviews(user, employeeId) {
-  const id = employeeId || user.employeeId;
-  assertEmployeeAccess(user, id);
-  return reviewRepo.find((g) => g.employeeId === id).map((r) => ({ ...r, reviewerName: nameOf(r.reviewerId) }));
-}
-
-export function upsertReview(user, body) {
-  requireFields(body, ['employeeId', 'period', 'score']);
-  assertEmployeeAccess(user, body.employeeId);
-  const row = reviewRepo.insert({
-    id: nextId('PR', reviewRepo.all()),
-    employeeId: body.employeeId,
-    period: body.period,
-    score: Number(body.score),
-    managerFeedback: body.managerFeedback || '',
-    employeeFeedback: body.employeeFeedback || '',
-    reviewerId: user.employeeId,
-    createdAt: nowIso(),
+  await writeAudit({
+    userId: user.id,
+    action: 'penalty.created',
+    module: 'penalties',
+    recordId: row.id,
   });
-  notifyEmployee(body.employeeId, { title: 'Performance review posted', body: `Score ${body.score} for ${body.period}`, module: 'performance' });
+
+  return withEmployeeName(row);
+}
+
+export async function decidePenalty(user, id, { decision }) {
+  if (![ROLES.PROCESS_MANAGER, ROLES.HR_ADMIN, ROLES.FINANCE].includes(user.role)) {
+    throw forbidden();
+  }
+
+  const row = await postgresPenaltyRepo.findById(id);
+  if (!row) throw notFound('Penalty not found.');
+
+  const status = decision === 'approve' ? 'approved' : 'rejected';
+
+  const updated = await postgresPenaltyRepo.update(id, { status });
+
+  await writeAudit({
+    userId: user.id,
+    action: `penalty.${status}`,
+    module: 'penalties',
+    recordId: id,
+  });
+
+  return withEmployeeName(updated);
+}
+
+// Performance
+
+const MANAGER_ROLES = [
+  ROLES.TEAM_LEADER,
+  ROLES.PROCESS_MANAGER,
+  ROLES.HR_ADMIN,
+];
+
+export async function listGoals(user, employeeId) {
+  const id = employeeId || user.employeeId;
+  await assertEmployeeAccess(user, id);
+
+  return postgresGoalRepo.find((goal) => goal.employeeId === id);
+}
+
+export async function listReviews(user, employeeId) {
+  const id = employeeId || user.employeeId;
+  await assertEmployeeAccess(user, id);
+
+  const reviews = await postgresReviewRepo.find(
+    (review) => review.employeeId === id
+  );
+
+  return Promise.all(
+    reviews.map(async (review) => ({
+      ...review,
+      reviewerName: await nameOf(review.reviewerId),
+    }))
+  );
+}
+
+export async function createGoal(user, body) {
+  requireFields(body, ['employeeId', 'title', 'period']);
+
+  if (!MANAGER_ROLES.includes(user.role)) throw forbidden();
+
+  if (body.employeeId === user.employeeId) {
+    throw forbidden('You cannot set goals for yourself.');
+  }
+
+  await assertEmployeeAccess(user, body.employeeId);
+
+  const row = await postgresGoalRepo.insert({
+    id: await postgresGoalRepo.nextId(),
+    employeeId: body.employeeId,
+    title: body.title.trim(),
+    kpi: body.kpi?.trim() || null,
+    period: body.period,
+    target: body.target?.trim() || null,
+    progress: 0,
+  });
+
+  await notifyEmployee(body.employeeId, {
+    title: 'New goal assigned',
+    body: row.title,
+    module: 'performance',
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'performance.goal_created',
+    module: 'performance',
+    recordId: row.id,
+  });
+
   return row;
 }
 
-export function listAssets(user) {
-  if (user.role === ROLES.IT_ADMIN) {
-    return assetRepo.all().map(decorateAsset);
+export async function updateGoalProgress(user, id, body) {
+  if (!MANAGER_ROLES.includes(user.role)) throw forbidden();
+
+  const goal = await postgresGoalRepo.findById(id);
+  if (!goal) throw notFound('Goal not found.');
+
+  if (goal.employeeId === user.employeeId) {
+    throw forbidden('You cannot update progress on your own goal.');
   }
-  const assigned = assetAssignmentRepo.find((a) => a.employeeId === user.employeeId && !a.returnedAt);
-  return assigned.map((a) => decorateAsset(assetRepo.findById(a.assetId), a));
+
+  await assertEmployeeAccess(user, goal.employeeId);
+
+  const progress = Number(body.progress);
+
+  if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
+    throw badRequest('Progress must be between 0 and 100.');
+  }
+
+  const updated = await postgresGoalRepo.update(id, { progress });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'performance.goal_progress',
+    module: 'performance',
+    recordId: id,
+    meta: { progress },
+  });
+
+  return updated;
 }
 
-function decorateAsset(asset, assignment) {
-  const asg = assignment || assetAssignmentRepo.findOne((a) => a.assetId === asset.id && !a.returnedAt);
+export async function upsertReview(user, body) {
+  requireFields(body, ['employeeId', 'period', 'score']);
+
+  if (!MANAGER_ROLES.includes(user.role)) throw forbidden();
+
+  if (body.employeeId === user.employeeId) {
+    throw forbidden('You cannot review yourself.');
+  }
+
+  await assertEmployeeAccess(user, body.employeeId);
+
+  const score = Number(body.score);
+
+  if (!Number.isFinite(score) || score < 0 || score > 10) {
+    throw badRequest('Score must be between 0 and 10.');
+  }
+
+  const row = await postgresReviewRepo.insert({
+    id: await postgresReviewRepo.nextId(),
+    employeeId: body.employeeId,
+    period: body.period,
+    score,
+    managerFeedback: body.managerFeedback || '',
+    employeeFeedback: '',
+    reviewerId: user.employeeId,
+    createdAt: nowIso(),
+  });
+
+  await notifyEmployee(body.employeeId, {
+    title: 'Performance review posted',
+    body: `Score ${score} for ${body.period}`,
+    module: 'performance',
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'performance.review_created',
+    module: 'performance',
+    recordId: row.id,
+  });
+
+  return row;
+}
+
+export async function addReviewFeedback(user, id, body) {
+  requireFields(body, ['feedback']);
+
+  const review = await postgresReviewRepo.findById(id);
+  if (!review) throw notFound('Review not found.');
+
+  if (review.employeeId !== user.employeeId) throw forbidden();
+
+  const updated = await postgresReviewRepo.update(id, {
+    employeeFeedback: body.feedback.trim(),
+  });
+
+  if (review.reviewerId) {
+    await notifyEmployee(review.reviewerId, {
+      title: 'Employee feedback received',
+      body: `${await nameOf(user.employeeId)} added feedback on a review.`,
+      module: 'performance',
+    });
+  }
+
+  await writeAudit({
+    userId: user.id,
+    action: 'performance.employee_feedback',
+    module: 'performance',
+    recordId: id,
+  });
+
+  return updated;
+}
+
+// Assets
+
+async function decorateAsset(asset, assignment) {
+  if (!asset) return null;
+
+  const currentAssignment = assignment || await postgresAssetAssignmentRepo.findOne(
+    (item) => item.assetId === asset.id && !item.returnedAt
+  );
+
   return {
     ...asset,
-    assignedEmployeeId: asg?.employeeId || null,
-    assignedEmployee: asg ? nameOf(asg.employeeId) : null,
-    assignmentDate: asg?.assignedAt || null,
-    returnDate: asg?.returnedAt || null,
+    assignedEmployeeId: currentAssignment?.employeeId || null,
+    assignedEmployee: currentAssignment
+      ? await nameOf(currentAssignment.employeeId)
+      : null,
+    assignmentDate: currentAssignment?.assignedAt || null,
+    returnDate: currentAssignment?.returnedAt || null,
   };
 }
 
-export function listAssetRequests(user) {
-  if (user.role === ROLES.IT_ADMIN) return assetRequestRepo.all().map((r) => ({ ...r, employeeName: nameOf(r.employeeId) }));
-  return scoped(user, assetRequestRepo.all()).map((r) => ({ ...r, employeeName: nameOf(r.employeeId) }));
+export async function listAssets(user) {
+  if (user.role === ROLES.IT_ADMIN || user.role === ROLES.HR_ADMIN) {
+    const assets = await postgresAssetRepo.all();
+
+    return Promise.all(assets.map((asset) => decorateAsset(asset)));
+  }
+
+  const assignments = await postgresAssetAssignmentRepo.find(
+    (item) => item.employeeId === user.employeeId && !item.returnedAt
+  );
+
+  return Promise.all(
+    assignments.map(async (assignment) => {
+      const asset = await postgresAssetRepo.findById(assignment.assetId);
+      return decorateAsset(asset, assignment);
+    })
+  );
 }
 
-export function requestAsset(user, body) {
+export async function listAssetRequests(user) {
+  const rows = await postgresAssetRequestRepo.all();
+
+  const visible = user.role === ROLES.IT_ADMIN || user.role === ROLES.HR_ADMIN
+    ? rows
+    : await scoped(user, rows);
+
+  return Promise.all(visible.map(withEmployeeName));
+}
+
+export async function requestAsset(user, body) {
   requireFields(body, ['assetType', 'reason']);
-  const row = assetRequestRepo.insert({
-    id: nextId('AR', assetRequestRepo.all()),
+
+  const row = await postgresAssetRequestRepo.insert({
+    id: await postgresAssetRequestRepo.nextId(),
     employeeId: user.employeeId,
     assetType: body.assetType,
     reason: body.reason,
@@ -204,60 +515,192 @@ export function requestAsset(user, body) {
     createdAt: nowIso(),
     updatedAt: nowIso(),
   });
-  writeAudit({ userId: user.id, action: 'asset.requested', module: 'assets', recordId: row.id });
-  return { ...row, employeeName: nameOf(row.employeeId) };
+
+  await writeAudit({
+    userId: user.id,
+    action: 'asset.requested',
+    module: 'assets',
+    recordId: row.id,
+  });
+
+  return withEmployeeName(row);
 }
 
-export function decideAssetRequest(user, id, { decision, note, assetId }) {
-  const row = assetRequestRepo.findById(id);
+export async function decideAssetRequest(user, id, { decision, note, assetId }) {
+  const row = await postgresAssetRequestRepo.findById(id);
   if (!row) throw notFound('Asset request not found.');
-  const emp = employeeRepo.findById(row.employeeId);
-  const chain = [
-    { role: ROLES.TEAM_LEADER, status: ASSET_REQUEST_STATUS.PENDING_TL, next: ASSET_REQUEST_STATUS.PENDING_PM, match: emp.teamLeaderId === user.employeeId },
-    { role: ROLES.PROCESS_MANAGER, status: ASSET_REQUEST_STATUS.PENDING_PM, next: ASSET_REQUEST_STATUS.PENDING_IT, match: emp.processManagerId === user.employeeId },
-    { role: ROLES.IT_ADMIN, status: ASSET_REQUEST_STATUS.PENDING_IT, next: ASSET_REQUEST_STATUS.FULFILLED, match: true },
-  ];
-  const step = chain.find((s) => s.role === user.role);
-  if (!step || row.status !== step.status) throw conflict('This request is not waiting for you.');
-  if (!step.match) throw forbidden();
-  if (decision === 'reject') {
-    const updated = assetRequestRepo.update(id, { status: ASSET_REQUEST_STATUS.REJECTED, updatedAt: nowIso() });
-    notifyEmployee(row.employeeId, { title: 'Asset request rejected', body: note || '', module: 'assets' });
-    return { ...updated, employeeName: nameOf(updated.employeeId) };
+
+  if (!['approve', 'reject'].includes(decision)) {
+    throw badRequest('Decision must be approve or reject.');
   }
+
+  const employee = await postgresEmployeeRepo.findById(row.employeeId);
+  if (!employee) throw notFound('Employee not found.');
+
+  const next = nextStatusAfterApproval({
+    user,
+    employee,
+    status: row.status,
+    chain: [
+      { role: ROLES.TEAM_LEADER, status: ASSET_REQUEST_STATUS.PENDING_TL },
+      { role: ROLES.PROCESS_MANAGER, status: ASSET_REQUEST_STATUS.PENDING_PM },
+      { role: ROLES.IT_ADMIN, status: ASSET_REQUEST_STATUS.PENDING_IT },
+    ],
+    done: ASSET_REQUEST_STATUS.FULFILLED,
+  });
+
+  if (decision === 'reject') {
+    const updated = await postgresAssetRequestRepo.update(id, {
+      status: ASSET_REQUEST_STATUS.REJECTED,
+      updatedAt: nowIso(),
+    });
+
+    await writeAudit({
+      userId: user.id,
+      action: 'asset.request_rejected',
+      module: 'assets',
+      recordId: id,
+    });
+
+    await notifyEmployee(row.employeeId, {
+      title: 'Asset request rejected',
+      body: note || 'Your request was rejected.',
+      module: 'assets',
+    });
+
+    return withEmployeeName(updated);
+  }
+
   if (user.role === ROLES.IT_ADMIN) {
     if (!assetId) throw badRequest('Select an available asset to assign.');
-    const asset = assetRepo.findById(assetId);
-    if (!asset || asset.status !== 'available') throw conflict('Asset is not available.');
-    assetRepo.update(assetId, { status: 'assigned' });
-    assetAssignmentRepo.insert({
-      id: nextId('AA', assetAssignmentRepo.all()),
+
+    const asset = await postgresAssetRepo.findById(assetId);
+
+    if (!asset || asset.status !== 'available') {
+      throw conflict('Asset is not available.');
+    }
+
+    await postgresAssetRepo.update(assetId, { status: 'assigned' });
+
+    await postgresAssetAssignmentRepo.insert({
+      id: await postgresAssetAssignmentRepo.nextId(),
       assetId,
       employeeId: row.employeeId,
       assignedAt: nowIso().slice(0, 10),
       returnedAt: null,
       assignedBy: user.employeeId,
     });
-    writeAudit({ userId: user.id, action: 'asset.assigned', module: 'assets', recordId: assetId });
+
+    await writeAudit({
+      userId: user.id,
+      action: 'asset.assigned',
+      module: 'assets',
+      recordId: assetId,
+    });
   }
-  const updated = assetRequestRepo.update(id, { status: step.next, updatedAt: nowIso() });
-  notifyEmployee(row.employeeId, { title: 'Asset request update', body: `Status: ${step.next.replaceAll('_', ' ')}`, module: 'assets' });
-  return { ...updated, employeeName: nameOf(updated.employeeId) };
+
+  const updated = await postgresAssetRequestRepo.update(id, {
+    status: next,
+    updatedAt: nowIso(),
+  });
+
+  await notifyEmployee(row.employeeId, {
+    title: 'Asset request update',
+    body: `Status: ${next.replaceAll('_', ' ')}`,
+    module: 'assets',
+  });
+
+  return withEmployeeName(updated);
 }
 
-export function listGrievances(user) {
-  const rows = user.role === ROLES.HR_ADMIN ? grievanceRepo.all() : scoped(user, grievanceRepo.all());
-  return rows.map((r) => ({
-    ...r,
-    employeeName: nameOf(r.employeeId),
-    comments: grievanceCommentRepo.find((c) => c.grievanceId === r.id),
-  }));
+export async function addAsset(user, body) {
+  requireFields(body, ['assetType', 'assetCode']);
+
+  const code = body.assetCode.trim();
+  const existing = (await postgresAssetRepo.all()).find(
+    (asset) => asset.assetCode === code
+  );
+
+  if (existing) throw conflict('Asset code already exists.');
+
+  const row = await postgresAssetRepo.insert({
+    id: await postgresAssetRepo.nextId(),
+    assetCode: code,
+    assetType: body.assetType,
+    serialNumber: body.serialNumber?.trim() || null,
+    condition: body.condition || 'good',
+    status: 'available',
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'asset.created',
+    module: 'assets',
+    recordId: row.id,
+  });
+
+  return decorateAsset(row);
 }
 
-export function createGrievance(user, body) {
+export async function returnAsset(user, assetId) {
+  const asset = await postgresAssetRepo.findById(assetId);
+  if (!asset) throw notFound('Asset not found.');
+
+  const assignment = await postgresAssetAssignmentRepo.findOne(
+    (item) => item.assetId === assetId && !item.returnedAt
+  );
+
+  if (!assignment) throw conflict('This asset is not assigned to anyone.');
+
+  await postgresAssetAssignmentRepo.update(assignment.id, {
+    returnedAt: nowIso().slice(0, 10),
+  });
+
+  const updated = await postgresAssetRepo.update(assetId, {
+    status: 'available',
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'asset.returned',
+    module: 'assets',
+    recordId: assetId,
+  });
+
+  await notifyEmployee(assignment.employeeId, {
+    title: 'Asset returned',
+    body: `${asset.assetCode} was marked as returned.`,
+    module: 'assets',
+  });
+
+  return decorateAsset(updated);
+}
+
+// Grievances
+
+export async function listGrievances(user) {
+  const rows = await postgresGrievanceRepo.all();
+
+  const visible = user.role === ROLES.HR_ADMIN
+    ? rows
+    : await scoped(user, rows);
+
+  return Promise.all(
+    visible.map(async (row) => ({
+      ...row,
+      employeeName: await nameOf(row.employeeId),
+      comments: await postgresGrievanceCommentRepo.find(
+        (comment) => comment.grievanceId === row.id
+      ),
+    }))
+  );
+}
+
+export async function createGrievance(user, body) {
   requireFields(body, ['subject', 'description', 'category']);
-  const row = grievanceRepo.insert({
-    id: nextId('GRV', grievanceRepo.all()),
+
+  const row = await postgresGrievanceRepo.insert({
+    id: await postgresGrievanceRepo.nextId(),
     employeeId: user.employeeId,
     subject: body.subject,
     description: body.description,
@@ -269,35 +712,78 @@ export function createGrievance(user, body) {
     createdAt: nowIso(),
     updatedAt: nowIso(),
   });
-  writeAudit({ userId: user.id, action: 'grievance.created', module: 'grievances', recordId: row.id });
-  return { ...row, employeeName: nameOf(row.employeeId), comments: [] };
+
+  await writeAudit({
+    userId: user.id,
+    action: 'grievance.created',
+    module: 'grievances',
+    recordId: row.id,
+  });
+
+  return {
+    ...row,
+    employeeName: await nameOf(row.employeeId),
+    comments: [],
+  };
 }
 
-export function commentGrievance(user, id, body) {
+export async function commentGrievance(user, id, body) {
   requireFields(body, ['body']);
-  const row = grievanceRepo.findById(id);
+
+  const row = await postgresGrievanceRepo.findById(id);
   if (!row) throw notFound('Grievance not found.');
-  if (user.role !== ROLES.HR_ADMIN && row.employeeId !== user.employeeId) throw forbidden();
-  const comment = grievanceCommentRepo.insert({
-    id: nextId('GC', grievanceCommentRepo.all()),
+
+  const isHr = user.role === ROLES.HR_ADMIN;
+
+  if (!isHr && row.employeeId !== user.employeeId) {
+    throw forbidden();
+  }
+
+  const comment = await postgresGrievanceCommentRepo.insert({
+    id: await postgresGrievanceCommentRepo.nextId(),
     grievanceId: id,
     authorId: user.employeeId,
     body: body.body,
     createdAt: nowIso(),
   });
-  grievanceRepo.update(id, { updatedAt: nowIso(), status: body.status || row.status, resolution: body.resolution ?? row.resolution });
-  notifyEmployee(row.employeeId, { title: 'Grievance update', body: body.body, module: 'grievances' });
+
+  await postgresGrievanceRepo.update(id, {
+    status: isHr ? body.status || row.status : row.status,
+    resolution: isHr ? body.resolution ?? row.resolution : row.resolution,
+  });
+
+  if (isHr) {
+    await notifyEmployee(row.employeeId, {
+      title: 'Grievance update',
+      body: body.body,
+      module: 'grievances',
+    });
+  }
+
+  await writeAudit({
+    userId: user.id,
+    action: 'grievance.commented',
+    module: 'grievances',
+    recordId: id,
+  });
+
   return comment;
 }
 
-export function listReimbursements(user) {
-  return scoped(user, reimbursementRepo.all()).map((r) => ({ ...r, employeeName: nameOf(r.employeeId) }));
+// Reimbursements
+
+export async function listReimbursements(user) {
+  const rows = await postgresReimbursementRepo.all();
+  const visible = await scoped(user, rows);
+
+  return Promise.all(visible.map(withEmployeeName));
 }
 
-export function submitReimbursement(user, body) {
+export async function submitReimbursement(user, body) {
   requireFields(body, ['expenseType', 'amount', 'expenseDate', 'description']);
-  const row = reimbursementRepo.insert({
-    id: nextId('RMB', reimbursementRepo.all()),
+
+  const row = await postgresReimbursementRepo.insert({
+    id: await postgresReimbursementRepo.nextId(),
     employeeId: user.employeeId,
     expenseType: body.expenseType,
     amount: Number(body.amount),
@@ -308,54 +794,129 @@ export function submitReimbursement(user, body) {
     createdAt: nowIso(),
     updatedAt: nowIso(),
   });
-  writeAudit({ userId: user.id, action: 'reimbursement.submitted', module: 'reimbursements', recordId: row.id });
-  return { ...row, employeeName: nameOf(row.employeeId) };
+
+  await writeAudit({
+    userId: user.id,
+    action: 'reimbursement.submitted',
+    module: 'reimbursements',
+    recordId: row.id,
+  });
+
+  return withEmployeeName(row);
 }
 
-export function decideReimbursement(user, id, { decision, note }) {
-  const row = reimbursementRepo.findById(id);
+export async function decideReimbursement(user, id, { decision, note }) {
+  const row = await postgresReimbursementRepo.findById(id);
   if (!row) throw notFound('Reimbursement not found.');
-  const emp = employeeRepo.findById(row.employeeId);
-  const chain = [
-    { role: ROLES.TEAM_LEADER, status: REIMBURSE_STATUS.PENDING_TL, next: REIMBURSE_STATUS.PENDING_PM, match: emp.teamLeaderId === user.employeeId },
-    { role: ROLES.PROCESS_MANAGER, status: REIMBURSE_STATUS.PENDING_PM, next: REIMBURSE_STATUS.PENDING_FINANCE, match: emp.processManagerId === user.employeeId },
-    { role: ROLES.FINANCE, status: REIMBURSE_STATUS.PENDING_FINANCE, next: REIMBURSE_STATUS.PAID, match: true },
-  ];
-  const step = chain.find((s) => s.role === user.role);
-  if (!step || row.status !== step.status) throw conflict('This request is not waiting for you.');
-  if (!step.match) throw forbidden();
-  const status = decision === 'reject' ? REIMBURSE_STATUS.REJECTED : step.next;
-  const updated = reimbursementRepo.update(id, { status, updatedAt: nowIso() });
-  writeAudit({
+
+  if (!['approve', 'reject'].includes(decision)) {
+    throw badRequest('Decision must be approve or reject.');
+  }
+
+  const employee = await postgresEmployeeRepo.findById(row.employeeId);
+  if (!employee) throw notFound('Employee not found.');
+
+  const next = nextStatusAfterApproval({
+    user,
+    employee,
+    status: row.status,
+    chain: [
+      { role: ROLES.TEAM_LEADER, status: REIMBURSE_STATUS.PENDING_TL },
+      { role: ROLES.PROCESS_MANAGER, status: REIMBURSE_STATUS.PENDING_PM },
+      { role: ROLES.FINANCE, status: REIMBURSE_STATUS.PENDING_FINANCE },
+    ],
+    done: REIMBURSE_STATUS.PAID,
+  });
+
+  const status = decision === 'reject' ? REIMBURSE_STATUS.REJECTED : next;
+
+  const updated = await postgresReimbursementRepo.update(id, {
+    status,
+    updatedAt: nowIso(),
+  });
+
+  await writeAudit({
     userId: user.id,
-    action: decision === 'reject' ? 'reimbursement.rejected' : 'reimbursement.approved',
+    action: decision === 'reject'
+      ? 'reimbursement.rejected'
+      : 'reimbursement.approved',
     module: 'reimbursements',
     recordId: id,
     meta: { note },
   });
-  notifyEmployee(row.employeeId, { title: 'Reimbursement update', body: `Status: ${status.replaceAll('_', ' ')}`, module: 'reimbursements' });
-  return { ...updated, employeeName: nameOf(updated.employeeId) };
+
+  await notifyEmployee(row.employeeId, {
+    title: 'Reimbursement update',
+    body: `Status: ${status.replaceAll('_', ' ')}`,
+    module: 'reimbursements',
+  });
+
+  return withEmployeeName(updated);
 }
 
-export function listLearning(user) {
-  const assignments = user.role === ROLES.HR_ADMIN || user.role === ROLES.PROCESS_MANAGER || user.role === ROLES.TEAM_LEADER
-    ? scoped(user, employeeCourseRepo.all())
-    : employeeCourseRepo.find((c) => c.employeeId === user.employeeId);
-  return assignments.map((a) => {
-    const course = courseRepo.findById(a.courseId);
-    return { ...a, courseTitle: course?.title, kind: course?.kind, hours: course?.hours, employeeName: nameOf(a.employeeId) };
+// Learning
+
+export async function listLearning(user) {
+  const rows = await postgresEmployeeCourseRepo.all();
+
+  const assignments = [
+    ROLES.HR_ADMIN,
+    ROLES.PROCESS_MANAGER,
+    ROLES.TEAM_LEADER,
+  ].includes(user.role)
+    ? await scoped(user, rows)
+    : rows.filter((item) => item.employeeId === user.employeeId);
+
+  return Promise.all(
+    assignments.map(async (assignment) => {
+      const course = await postgresCourseRepo.findById(assignment.courseId);
+
+      return {
+        ...assignment,
+        courseTitle: course?.title,
+        kind: course?.kind,
+        hours: course?.hours,
+        employeeName: await nameOf(assignment.employeeId),
+      };
+    })
+  );
+}
+
+export async function listCourses() {
+  return postgresCourseRepo.all();
+}
+
+export async function createCourse(user, body) {
+  if (user.role !== ROLES.HR_ADMIN) throw forbidden();
+
+  requireFields(body, ['title', 'kind']);
+
+  return postgresCourseRepo.insert({
+    id: await postgresCourseRepo.nextId(),
+    title: body.title.trim(),
+    kind: body.kind,
+    hours: Number(body.hours || 0),
   });
 }
 
-export function listCourses() {
-  return courseRepo.all();
-}
-
-export function assignCourse(user, body) {
+export async function assignCourse(user, body) {
   requireFields(body, ['employeeId', 'courseId']);
-  assertEmployeeAccess(user, body.employeeId);
-  const row = employeeCourseRepo.insert({
-    id: nextId('EC', employeeCourseRepo.all()),
+  await assertEmployeeAccess(user, body.employeeId);
+
+  const course = await postgresCourseRepo.findById(body.courseId);
+  if (!course) throw notFound('Course not found.');
+
+  const existing = (await postgresEmployeeCourseRepo.all()).find(
+    (item) =>
+      item.employeeId === body.employeeId &&
+      item.courseId === body.courseId &&
+      item.status !== 'completed'
+  );
+
+  if (existing) throw conflict('This course is already assigned to the employee.');
+
+  const row = await postgresEmployeeCourseRepo.insert({
+    id: await postgresEmployeeCourseRepo.nextId(),
     employeeId: body.employeeId,
     courseId: body.courseId,
     status: 'assigned',
@@ -363,54 +924,182 @@ export function assignCourse(user, body) {
     assignedBy: user.employeeId,
     completedAt: null,
   });
-  notifyEmployee(body.employeeId, { title: 'New learning assigned', body: 'A course was assigned to you.', module: 'learning' });
+
+  await notifyEmployee(body.employeeId, {
+    title: 'New learning assigned',
+    body: `${course.title} was assigned to you.`,
+    module: 'learning',
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'learning.assigned',
+    module: 'learning',
+    recordId: row.id,
+  });
+
   return row;
 }
 
-export function completeCourse(user, id) {
-  const row = employeeCourseRepo.findById(id);
+export async function completeCourse(user, id) {
+  const row = await postgresEmployeeCourseRepo.findById(id);
   if (!row) throw notFound('Assignment not found.');
+
   if (row.employeeId !== user.employeeId) throw forbidden();
-  return employeeCourseRepo.update(id, { status: 'completed', completedAt: nowIso(), certificate: `CERT-${id}` });
+
+  if (row.status === 'completed') {
+    throw conflict('This course is already completed.');
+  }
+
+  const updated = await postgresEmployeeCourseRepo.update(id, {
+    status: 'completed',
+    completedAt: nowIso(),
+    certificate: `CERT-${id}`,
+  });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'learning.completed',
+    module: 'learning',
+    recordId: id,
+  });
+
+  return updated;
 }
 
-export function listLookups() {
+// Lookups and settings
+
+export async function listLookups() {
   return {
-    departments: departmentRepo.all(),
-    designations: designationRepo.all(),
+    departments: await postgresDepartmentRepo.all(),
+    designations: await postgresDesignationRepo.all(),
     settings: getSettings(),
   };
 }
 
-export function saveSettings(user, body) {
+export async function saveSettings(user, body) {
   const updated = updateSettings(body);
-  writeAudit({ userId: user.id, action: 'settings.updated', module: 'settings', recordId: 'company' });
+
+  await writeAudit({
+    userId: user.id,
+    action: 'settings.updated',
+    module: 'settings',
+    recordId: 'company',
+  });
+
   return updated;
 }
 
-export function searchAll(user, q) {
+// Global search
+
+export async function searchAll(user, q) {
   const query = String(q || '').trim().toLowerCase();
-  if (query.length < 2) return { employees: [], assets: [], requests: [] };
-  const ids = accessibleEmployeeIds(user);
-  const employees = employeeRepo
-    .all()
-    .filter((e) => ids.includes(e.id))
-    .filter((e) => `${e.firstName} ${e.lastName} ${e.email} ${e.employeeCode} ${e.id}`.toLowerCase().includes(query))
+
+  if (query.length < 2) {
+    return { employees: [], departments: [], designations: [], assets: [], requests: [] };
+  }
+
+  const ids = await accessibleEmployeeIds(user);
+
+  const [
+    allEmployees,
+    allDepartments,
+    allDesignations,
+    allAssets,
+    allReimbursements,
+    allLeaves,
+  ] = await Promise.all([
+    postgresEmployeeRepo.all(),
+    postgresDepartmentRepo.all(),
+    postgresDesignationRepo.all(),
+    postgresAssetRepo.all(),
+    postgresReimbursementRepo.all(),
+    postgresLeaveRequests(),
+  ]);
+
+  const employees = allEmployees
+    .filter((employee) => ids.includes(employee.id))
+    .filter((employee) =>
+      `${employee.firstName} ${employee.lastName} ${employee.email} ${employee.employeeCode} ${employee.id}`
+        .toLowerCase()
+        .includes(query)
+    )
     .slice(0, 8)
-    .map((e) => ({ type: 'employee', id: e.id, label: `${e.firstName} ${e.lastName}`, sub: e.employeeCode }));
-  const departments = departmentRepo.all().filter((d) => d.name.toLowerCase().includes(query)).map((d) => ({ type: 'department', id: d.id, label: d.name }));
-  const designations = designationRepo.all().filter((d) => d.name.toLowerCase().includes(query)).map((d) => ({ type: 'designation', id: d.id, label: d.name }));
-  const assets = assetRepo.all().filter((a) => `${a.assetCode} ${a.serialNumber} ${a.assetType}`.toLowerCase().includes(query)).slice(0, 6).map((a) => ({ type: 'asset', id: a.id, label: a.assetCode, sub: a.assetType }));
+    .map((employee) => ({
+      type: 'employee',
+      id: employee.id,
+      label: `${employee.firstName} ${employee.lastName}`,
+      sub: employee.employeeCode,
+    }));
+
+  const departments = allDepartments
+    .filter((department) => department.name.toLowerCase().includes(query))
+    .map((department) => ({
+      type: 'department',
+      id: department.id,
+      label: department.name,
+    }));
+
+  const designations = allDesignations
+    .filter((designation) => designation.name.toLowerCase().includes(query))
+    .map((designation) => ({
+      type: 'designation',
+      id: designation.id,
+      label: designation.name,
+    }));
+
+  const assets = allAssets
+    .filter((asset) =>
+      `${asset.assetCode || ''} ${asset.serialNumber || ''} ${asset.assetType || ''}`
+        .toLowerCase()
+        .includes(query)
+    )
+    .slice(0, 6)
+    .map((asset) => ({
+      type: 'asset',
+      id: asset.id,
+      label: asset.assetCode || asset.id,
+      sub: asset.assetType,
+    }));
+
   const requests = [
-    ...leaveRepoSafe(ids, query),
+    ...allLeaves
+      .filter((leave) => ids.includes(leave.employeeId))
+      .filter((leave) =>
+        `${leave.id} ${leave.leaveType || ''} ${leave.reason || ''}`
+          .toLowerCase()
+          .includes(query)
+      )
+      .slice(0, 5)
+      .map((leave) => ({
+        type: 'leave',
+        id: leave.id,
+        label: leave.id,
+        sub: leave.status,
+      })),
+    ...allReimbursements
+      .filter((item) => ids.includes(item.employeeId))
+      .filter((item) =>
+        `${item.id} ${item.expenseType || ''} ${item.description || ''}`
+          .toLowerCase()
+          .includes(query)
+      )
+      .slice(0, 5)
+      .map((item) => ({
+        type: 'reimbursement',
+        id: item.id,
+        label: item.id,
+        sub: item.status,
+      })),
   ];
+
   return { employees, departments, designations, assets, requests };
 }
 
-function leaveRepoSafe(ids, query) {
-  return reimbursementRepo
-    .find((r) => ids.includes(r.employeeId))
-    .filter((r) => `${r.id} ${r.expenseType} ${r.description}`.toLowerCase().includes(query))
-    .slice(0, 5)
-    .map((r) => ({ type: 'reimbursement', id: r.id, label: r.id, sub: r.status }));
+async function postgresLeaveRequests() {
+  const { postgresLeaveRepo } = await import(
+    '../repositories/postgres/leave.repository.js'
+  );
+
+  return postgresLeaveRepo.all();
 }

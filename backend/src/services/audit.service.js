@@ -1,18 +1,31 @@
-import { auditRepo } from '../repositories/index.js';
-import { nextId, nowIso } from '../utils/ids.js';
 
-export function writeAudit({ userId, action, module, recordId, meta }) {
-  return auditRepo.insert({
-    id: nextId('AUD', auditRepo.all()),
+import { postgresAuditRepo } from '../repositories/postgres/audit.repository.js';
+
+export async function writeAudit({
+  userId,
+  action,
+  module,
+  recordId,
+  meta,
+}) {
+  const id = await postgresAuditRepo.nextId();
+
+  return postgresAuditRepo.insert({
+    id,
     userId: userId || null,
     action,
     module,
     recordId: recordId || null,
     meta: meta || {},
-    createdAt: nowIso(),
   });
 }
 
-export function listAudit(limit = 100) {
-  return [...auditRepo.all()].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, limit);
+export async function listAudit(limit = 100) {
+  const logs = await postgresAuditRepo.all();
+
+  return logs
+    .sort((a, b) =>
+      String(b.createdAt).localeCompare(String(a.createdAt))
+    )
+    .slice(0, limit);
 }

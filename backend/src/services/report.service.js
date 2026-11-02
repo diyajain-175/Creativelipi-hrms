@@ -2,33 +2,59 @@ import { listEmployees } from './employee.service.js';
 import { listAttendance } from './attendance.service.js';
 import { listLeave } from './leave.service.js';
 import { listPayroll } from './payroll.service.js';
-import { listIncentives, listAssets, listReimbursements, listGrievances, listReviews } from './modules.service.js';
+
+import {
+  listIncentives,
+  listAssets,
+  listReimbursements,
+  listGrievances,
+  listReviews,
+} from './modules.service.js';
+
 import { badRequest } from '../utils/errors.js';
 
-const builders = {
-  employees: (user, q) => listEmployees(user, q),
-  attendance: (user, q) => listAttendance(user, q),
-  leave: (user, q) => listLeave(user, q),
-  payroll: (user, q) => listPayroll(user, q),
+const reportBuilders = {
+  employees: (user, query) => listEmployees(user, query),
+  attendance: (user, query) => listAttendance(user, query),
+  leave: (user, query) => listLeave(user, query),
+  payroll: (user, query) => listPayroll(user, query),
   incentives: (user) => listIncentives(user),
-  performance: (user, q) => listReviews(user, q.employeeId),
+  performance: (user, query) =>
+    listReviews(user, query?.employeeId),
   assets: (user) => listAssets(user),
   reimbursements: (user) => listReimbursements(user),
   grievances: (user) => listGrievances(user),
 };
 
-export function runReport(user, type, query) {
-  const build = builders[type];
-  if (!build) throw badRequest('Unknown report type.');
-  return build(user, query);
+export async function runReport(user, type, query = {}) {
+  const buildReport = reportBuilders[type];
+
+  if (!buildReport) {
+    throw badRequest('Unknown report type.');
+  }
+
+  return await buildReport(user, query);
 }
 
-export function toCsv(rows) {
+export function toCsv(rows = []) {
   if (!rows.length) return '';
-  const keys = Object.keys(rows[0]).filter((k) => typeof rows[0][k] !== 'object');
-  const header = keys.join(',');
-  const lines = rows.map((row) =>
-    keys.map((k) => `"${String(row[k] ?? '').replaceAll('"', '""')}"`).join(',')
+
+  const columns = Object.keys(rows[0]).filter(
+    (key) =>
+      rows[0][key] === null ||
+      typeof rows[0][key] !== 'object'
   );
+
+  const header = columns.join(',');
+
+  const lines = rows.map((row) =>
+    columns
+      .map((key) => {
+        const value = String(row[key] ?? '').replaceAll('"', '""');
+        return `"${value}"`;
+      })
+      .join(',')
+  );
+
   return [header, ...lines].join('\n');
 }

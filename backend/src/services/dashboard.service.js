@@ -1,10 +1,17 @@
 import { ROLES } from '../config/roles.js';
-import { employeeRepo, leaveRepo, grievanceRepo } from '../repositories/index.js';
+import { LEAVE_STATUS } from '../config/workflows.js';
+import { todayIso } from '../utils/ids.js';
+
+import { postgresEmployeeRepo } from '../repositories/postgres/employee.repository.js';
+import { postgresLeaveRepo } from '../repositories/postgres/leave.repository.js';
+import { postgresGrievanceRepo } from '../repositories/postgres/grievance.repository.js';
+
 import { accessibleEmployeeIds } from './scope.service.js';
 import { publicEmployee } from './employee.service.js';
 import { todayAttendance, listAttendance } from './attendance.service.js';
 import { balancesFor, listLeave } from './leave.service.js';
 import { listPayroll } from './payroll.service.js';
+
 import {
   listAssets,
   listRewards,
@@ -14,70 +21,113 @@ import {
   listIncentives,
   listAssetRequests,
 } from './modules.service.js';
-import { listNotifications } from './notification.service.js';
-import { LEAVE_STATUS } from '../config/workflows.js';
-import { todayIso } from '../utils/ids.js';
 
-export function buildDashboard(user) {
+import { listNotifications } from './notification.service.js';
+
+export async function buildDashboard(user) {
   switch (user.role) {
     case ROLES.TEAM_LEADER:
       return teamLeaderDashboard(user);
+
     case ROLES.PROCESS_MANAGER:
       return processManagerDashboard(user);
+
     case ROLES.HR_ADMIN:
       return hrDashboard(user);
+
     case ROLES.FINANCE:
       return financeDashboard(user);
+
     case ROLES.IT_ADMIN:
       return itDashboard(user);
+
     default:
       return employeeDashboard(user);
   }
 }
 
-function employeeDashboard(user) {
-  const me = employeeRepo.findById(user.employeeId);
-  const payroll = listPayroll(user);
+async function employeeDashboard(user) {
+  const me = await postgresEmployeeRepo.findById(user.employeeId);
+
+  if (!me) {
+    throw new Error('Employee profile not found.');
+  }
+
+  const [
+    payroll,
+    attendance,
+    leaveBalances,
+    leaves,
+    assets,
+    reimbursements,
+    grievances,
+    rewards,
+    learning,
+    notifications,
+    profile,
+  ] = await Promise.all([
+    listPayroll(user),
+    todayAttendance(user.employeeId),
+    balancesFor(user.employeeId),
+    listLeave(user),
+    listAssets(user),
+    listReimbursements(user),
+    listGrievances(user),
+    listRewards(user),
+    listLearning(user),
+    listNotifications(user.id),
+    publicEmployee(me, user),
+  ]);
 
   return {
     kind: 'employee',
     welcome: `Good to see you, ${me.firstName}.`,
-    profile: publicEmployee(me, user),
-    attendance: todayAttendance(user.employeeId),
-    leaveBalances: balancesFor(user.employeeId),
-    pendingLeave: listLeave(user).filter(
-      (l) =>
-        l.status.startsWith('pending') &&
-        l.employeeId === user.employeeId
+    profile,
+    attendance,
+    leaveBalances,
+    pendingLeave: leaves.filter(
+      (leave) =>
+        leave.employeeId === user.employeeId &&
+        leave.status.startsWith('pending')
     ),
     payrollSummary: payroll[0] || null,
-    assets: listAssets(user),
-    reimbursements: listReimbursements(user).slice(0, 5),
-    grievances: listGrievances(user).slice(0, 5),
-    rewards: listRewards(user).slice(0, 5),
-    learning: listLearning(user),
-    notifications: listNotifications(user.id).slice(0, 6),
+    assets,
+    reimbursements: reimbursements.slice(0, 5),
+    grievances: grievances.slice(0, 5),
+    rewards: rewards.slice(0, 5),
+    learning,
+    notifications: notifications.slice(0, 6),
   };
 }
 
-function teamStats(user) {
-  const accessibleIds = accessibleEmployeeIds(user);
-  const ids = Array.isArray(accessibleIds) ? accessibleIds : [];
-
+async function teamStats(user) {
+  const ids = await accessibleEmployeeIds(user);
   const teamIds = ids.filter((id) => id !== user.employeeId);
-  const people = teamIds
-    .map((id) => employeeRepo.findById(id))
-    .filter(Boolean);
+
+  const allEmployees = await postgresEmployeeRepo.all();
+
+  const people = allEmployees.filter((employee) =>
+    teamIds.includes(employee.id)
+  );
 
   const today = todayIso();
-  const att = listAttendance(user, { from: today, to: today });
+  const attendance = await listAttendance(user, {
+    from: today,
+    to: today,
+  });
 
-  const present = att.filter((a) =>
-    ['present', 'late'].includes(a.status)
+  const present = attendance.filter((item) =>
+    ['present', 'late'].includes(item.status)
   ).length;
 
-  const onLeave = att.filter((a) => a.status === 'leave').length;
-  const absent = Math.max(0, people.length - present - onLeave);
+  const onLeave = attendance.filter(
+    (item) => item.status === 'leave'
+  ).length;
+
+  const absent = Math.max(
+    0,
+    people.length - present - onLeave
+  );
 
   return {
     people,
@@ -87,94 +137,144 @@ function teamStats(user) {
   };
 }
 
-function teamLeaderDashboard(user) {
-  const { people, present, absent, onLeave } = teamStats(user);
+async function teamLeaderDashboard(user) {
+  const [
+    stats,
+    leaves,
+    incentives,
+    grievances,
+  ] = await Promise.all([
+    teamStats(user),
+    listLeave(user),
+    listIncentives(user),
+    listGrievances(user),
+  ]);
 
   return {
     kind: 'team_leader',
     welcome: 'Your team for today',
-    teamSize: people.length,
-    present,
-    absent,
-    onLeave,
-    pendingLeave: listLeave(user).filter(
-      (l) => l.status === LEAVE_STATUS.PENDING_TL
+    teamSize: stats.people.length,
+    present: stats.present,
+    absent: stats.absent,
+    onLeave: stats.onLeave,
+    pendingLeave: leaves.filter(
+      (leave) => leave.status === LEAVE_STATUS.PENDING_TL
     ),
-    incentives: listIncentives(user),
-    grievances: listGrievances(user),
-    people: people.map((p) => publicEmployee(p, user)),
+    incentives,
+    grievances,
+    people: await Promise.all(
+      stats.people.map((employee) => publicEmployee(employee, user))
+    ),
   };
 }
 
-function processManagerDashboard(user) {
-  const { people, present, absent, onLeave } = teamStats(user);
+async function processManagerDashboard(user) {
+  const [
+    stats,
+    leaves,
+    incentives,
+    reimbursements,
+  ] = await Promise.all([
+    teamStats(user),
+    listLeave(user),
+    listIncentives(user),
+    listReimbursements(user),
+  ]);
 
   return {
     kind: 'process_manager',
     welcome: 'Process overview',
-    employeeCount: people.length,
-    present,
-    absent,
-    onLeave,
-    pendingLeave: listLeave(user).filter(
-      (l) => l.status === LEAVE_STATUS.PENDING_PM
+    employeeCount: stats.people.length,
+    present: stats.present,
+    absent: stats.absent,
+    onLeave: stats.onLeave,
+    pendingLeave: leaves.filter(
+      (leave) => leave.status === LEAVE_STATUS.PENDING_PM
     ),
-    pendingIncentives: listIncentives(user).filter(
-      (i) => i.status.includes('pending')
+    pendingIncentives: incentives.filter(
+      (item) => item.status.includes('pending')
     ),
-    reimbursements: listReimbursements(user).filter(
-      (r) => r.status.startsWith('pending')
+    reimbursements: reimbursements.filter(
+      (item) => item.status.startsWith('pending')
     ),
-    people: people.map((p) => publicEmployee(p, user)),
+    people: await Promise.all(
+      stats.people.map((employee) => publicEmployee(employee, user))
+    ),
   };
 }
 
-function hrDashboard(user) {
-  const all = employeeRepo.all();
+async function hrDashboard(user) {
+  const [
+    employees,
+    leaves,
+    grievances,
+    learning,
+    rewards,
+    payroll,
+  ] = await Promise.all([
+    postgresEmployeeRepo.all(),
+    postgresLeaveRepo.all(),
+    postgresGrievanceRepo.all(),
+    listLearning(user),
+    listRewards(user),
+    listPayroll(user),
+  ]);
+
+  const month = todayIso().slice(0, 7);
 
   return {
     kind: 'hr_admin',
     welcome: 'CreativeLipi people operations',
-    totalEmployees: all.length,
-    active: all.filter((e) => e.employmentStatus === 'active').length,
-    newEmployees: all.filter(
-      (e) => (e.joiningDate || '').startsWith('2026-10')
+    totalEmployees: employees.length,
+    active: employees.filter(
+      (employee) => employee.employmentStatus === 'active'
     ).length,
-    pendingLeave: leaveRepo
-      .all()
-      .filter((l) => l.status.startsWith('pending')).length,
-    grievances: grievanceRepo
-      .all()
-      .filter((g) => g.status !== 'resolved').length,
-    learning: listLearning(user).length,
-    rewards: listRewards(user).length,
-    payrollOpen: listPayroll(user).filter(
-      (p) => p.status !== 'paid'
+    newEmployees: employees.filter(
+      (employee) => (employee.joiningDate || '').startsWith(month)
+    ).length,
+    pendingLeave: leaves.filter(
+      (leave) => leave.status.startsWith('pending')
+    ).length,
+    grievances: grievances.filter(
+      (grievance) => grievance.status !== 'resolved'
+    ).length,
+    learning: learning.length,
+    rewards: rewards.length,
+    payrollOpen: payroll.filter(
+      (item) => item.status !== 'paid'
     ).length,
   };
 }
 
-function financeDashboard(user) {
-  const reimbursements = listReimbursements(user);
+async function financeDashboard(user) {
+  const [reimbursements, payroll] = await Promise.all([
+    listReimbursements(user),
+    listPayroll(user),
+  ]);
 
   return {
     kind: 'finance',
     welcome: 'Payroll and reimbursements',
-    payroll: listPayroll(user).slice(0, 12),
+    payroll: payroll.slice(0, 12),
     reimbursements,
     pendingReimbursements: reimbursements.filter(
-      (r) => r.status === 'pending_finance'
+      (item) => item.status === 'pending_finance'
     ).length,
   };
 }
 
-function itDashboard(user) {
+async function itDashboard(user) {
+  const [assets, requests] = await Promise.all([
+    listAssets(user),
+    listAssetRequests(user),
+  ]);
+
   return {
     kind: 'it_admin',
     welcome: 'Asset desk',
-    assets: listAssets(user),
-    pendingRequests: listAssetRequests(user).filter(
-      (r) => r.status === 'pending_it'
+    assets,
+    pendingRequests: requests.filter(
+      (request) => request.status === 'pending_it'
     ),
   };
 }
