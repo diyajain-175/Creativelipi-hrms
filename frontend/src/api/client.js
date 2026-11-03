@@ -43,6 +43,26 @@ export const api = {
   patch: (path, body) => request(path, { method: 'PATCH', body }),
 };
 
+export async function fetchBlob(path) {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    credentials: 'include',
+  });
+
+  if (!res.ok) {
+    let message = 'Request failed';
+
+    try {
+      message = (await res.json()).message || message;
+    } catch {
+      // response was not JSON
+    }
+
+    throw new Error(message);
+  }
+
+  return res.blob();
+}
+
 export function downloadCsv(path, filename) {
   return fetch(`${API_BASE_URL}${path}`, {
     credentials: 'include',

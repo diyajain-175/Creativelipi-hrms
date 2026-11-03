@@ -270,3 +270,27 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_leave_status ON leave_requests(status);
 CREATE INDEX IF NOT EXISTS idx_attendance_date ON attendance(work_date);
+
+
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS documents JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+CREATE TABLE IF NOT EXISTS offer_letters (
+  id TEXT PRIMARY KEY,
+  first_name TEXT NOT NULL,
+  last_name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT,
+  role TEXT NOT NULL DEFAULT 'employee',
+  department_id TEXT REFERENCES departments(id),
+  designation_id TEXT REFERENCES designations(id),
+  location TEXT,
+  joining_date DATE NOT NULL,
+  basic_salary NUMERIC(12,2) NOT NULL DEFAULT 0,
+  allowances NUMERIC(12,2) NOT NULL DEFAULT 0,
+  team_leader_id TEXT REFERENCES employees(id),
+  process_manager_id TEXT REFERENCES employees(id),
+  status TEXT NOT NULL DEFAULT 'issued',
+  employee_id TEXT REFERENCES employees(id),
+  created_by TEXT REFERENCES employees(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

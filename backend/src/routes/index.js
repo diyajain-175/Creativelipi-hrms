@@ -20,6 +20,7 @@ import * as dashboard from '../services/dashboard.service.js';
 import * as notifications from '../services/notification.service.js';
 import * as reports from '../services/report.service.js';
 import * as audit from '../services/audit.service.js';
+import * as offers from '../services/offer.service.js';
 
 import { LEAVE_TYPES } from '../config/workflows.js';
 
@@ -431,6 +432,34 @@ router.get('/reports/:type', wrap(async (req, res) => {
 
   res.json(rows);
 }));
+
+router.get(
+  '/offers',
+  requirePermission(P.EMPLOYEES_WRITE),
+  wrap(async (req, res) => {
+    res.json(await offers.listOffers(req.user));
+  })
+);
+
+router.post(
+  '/offers',
+  requirePermission(P.EMPLOYEES_WRITE),
+  wrap(async (req, res) => {
+    res.status(201).json(await offers.createOffer(req.user, req.body));
+  })
+);
+
+router.get(
+  '/offers/:id/pdf',
+  requirePermission(P.EMPLOYEES_WRITE),
+  wrap(async (req, res) => {
+    const { buffer, filename } = await offers.getOfferPdf(req.user, req.params.id);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    res.send(buffer);
+  })
+);
 
 router.get('/lookups', wrap(async (_req, res) => {
   res.json(await modules.listLookups());

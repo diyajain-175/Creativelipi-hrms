@@ -22,6 +22,7 @@ import { RecognitionPage } from './pages/RecognitionPage.jsx';
 import { LearningPage } from './pages/LearningPage.jsx';
 import { IncentivesPage } from './pages/IncentivesPage.jsx';
 import { PerformancePage } from './pages/PerformancePage.jsx';
+import { OffersPage } from './pages/OffersPage.jsx';
 
 import { Layout } from './components/Layout.jsx';
 
@@ -56,6 +57,7 @@ function App() {
         <Route path="/learning" element={<LearningPage />} />
         <Route path="/incentives" element={<IncentivesPage />} />
         <Route path="/performance" element={<PerformancePage />} />
+        <Route path="/offers" element={<OffersPage />} />
 
         <Route
           path="/employee-dashboard"

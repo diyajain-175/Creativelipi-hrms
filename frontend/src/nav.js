@@ -51,6 +51,7 @@ export const NAV = {
     { to: '/reports', label: 'Reports' },
     { to: '/assets', label: 'IT Assets' },
     { to: '/incentives', label: 'Incentives' },
+    { to: '/offers', label: 'Offer Letters' },
   ],
   finance: [
     { to: '/', label: 'Dashboard' },
