@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { useAuth } from './auth/AuthContext.jsx';
 // import './App.css';
 import { Login } from './pages/Login.jsx';
+import { ChangePasswordPage } from './pages/ChangePasswordPage.jsx';
 import { DashboardPage } from './pages/dashboards/DashboardPage.jsx';
 import { EmployeeDashboard } from './pages/dashboards/EmployeeDashboard.jsx';
 import { TeamLeaderDashboard } from './pages/dashboards/TeamLeaderDashboard.jsx';
@@ -39,6 +40,10 @@ function App() {
         <Route path="*" element={<Login />} />
       </Routes>
     );
+  }
+
+  if (user.mustChangePassword) {
+    return <ChangePasswordPage />;
   }
 
   return (

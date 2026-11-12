@@ -10,6 +10,7 @@ function mapUser(row) {
     role: row.role,
     employeeId: row.employee_id,
     isActive: row.is_active,
+    mustChangePassword: row.must_change_password,
     createdAt: row.created_at,
   };
 }
@@ -86,9 +87,10 @@ export const postgresUserRepo = {
         password_hash,
         role,
         employee_id,
-        is_active
+        is_active,
+        must_change_password
       )
-      VALUES ($1,$2,$3,$4,$5,$6)
+      VALUES ($1,$2,$3,$4,$5,$6,$7)
       RETURNING *`,
       [
         user.id,
@@ -97,6 +99,7 @@ export const postgresUserRepo = {
         user.role,
         user.employeeId,
         user.isActive ?? true,
+        user.mustChangePassword ?? false,
       ]
     );
 
@@ -110,6 +113,7 @@ export const postgresUserRepo = {
       role: 'role',
       employeeId: 'employee_id',
       isActive: 'is_active',
+      mustChangePassword: 'must_change_password',
     };
 
     const updates = [];

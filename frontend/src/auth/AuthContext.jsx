@@ -27,6 +27,11 @@ export function AuthProvider({ children }) {
         setUser(data.user);
         return data.user;
       },
+      async refresh() {
+        const data = await api.get('/api/auth/me');
+        setUser(data.user);
+        return data.user;
+      },
       async logout() {
         await api.post('/api/auth/logout', {});
         setUser(null);

@@ -31,6 +31,7 @@ export async function requireAuth(req, _res, next) {
       email: user.email,
       role: user.role,
       employeeId: user.employeeId,
+      mustChangedPassword: user.mustChangePassword,
     };
 
     next();

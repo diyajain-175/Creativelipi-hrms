@@ -146,11 +146,59 @@ function OfferModal({ onClose, onDone }) {
   );
 }
 
+function CredentialsModal({ creds, onClose }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    const text = `Email: ${creds.loginEmail}\nTemporary password: ${creds.temporaryPassword}`;
+
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+    } catch {
+      alert('Copy not allowed by the browser. Please copy it manually.');
+    }
+  }
+
+  return (
+    <Modal title="Login details" onClose={onClose}>
+      <div className="form">
+        <p>
+          Dashboard login for <strong>{creds.name}</strong> ({creds.employeeCode}) is ready.
+          Share these details with the employee.
+        </p>
+        <p>
+          <strong>Email:</strong> {creds.loginEmail}
+        </p>
+        <p>
+          <strong>Temporary password:</strong>{' '}
+          <code style={{ fontSize: 18 }}>{creds.temporaryPassword}</code>
+        </p>
+        <p className="error">
+          Passwords are stored in a secure (hashed) form, so this password cannot be shown again
+          after you close this window. If you need it again, use "Show /reset login" to generate a new temporary
+          password. The employee will be asked to set a new password at the next login. 
+        </p>
+        <div className="actions">
+          <button className="btn" type="button" onClick={copy}>
+            {copied ? 'Copied' : 'Copy details'}
+          </button>
+          <button className="btn secondary" type="button" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export function OffersPage() {
   const { user } = useAuth();
   const list = useApi('/api/offers', [user.id]);
   const [open, setOpen] = useState(false);
-    async function viewLetter(offer) {
+  const [creds, setCreds] = useState(null);
+
+  async function viewLetter(offer) {
     const win = window.open('', '_blank');
 
     try {
@@ -178,6 +226,36 @@ export function OffersPage() {
     }
   }
 
+  async function createLogin(offer) {
+    const ok = window.confirm(
+      `Create dashboard login for ${offer.firstName} ${offer.lastName}?`
+    );
+
+    if (!ok) return;
+
+    try {
+      const data = await api.post(`/api/offers/${offer.id}/create-login`, {});
+      setCreds(data);
+      list.reload();
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+    async function resetLogin(offer) {
+    const ok = window.confirm(
+      `Generate a new temporary password for ${offer.firstName} ${offer.lastName}? The old password will stop working.`
+    );
+
+    if (!ok) return;
+
+    try {
+      const data = await api.post(`/api/offers/${offer.id}/reset-login`, {});
+      setCreds(data);
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
   if (list.loading) return <LoadingState />;
   if (list.error) return <ErrorState error={list.error} />;
 
@@ -194,6 +272,7 @@ export function OffersPage() {
             { key: 'id', header: 'Offer' },
             { key: 'candidate', header: 'Candidate', render: (r) => `${r.firstName} ${r.lastName}` },
             { key: 'email', header: 'Email' },
+            { key: 'employeeId', header: 'Employee ID', render: (r) => r.employeeId || '-' },
             { key: 'designationName', header: 'Designation' },
             { key: 'departmentName', header: 'Department' },
             { key: 'joiningDate', header: 'Joining date' },
@@ -201,11 +280,16 @@ export function OffersPage() {
             { key: 'status', header: 'Status', render: (r) => <StatusBadge value={r.status} /> },
             {
               key: 'act',
-              header: 'Letter',
+              header: 'Actions',
               render: (r) => (
                 <div className="row-actions">
                   <button className="btn secondary" type="button" onClick={() => viewLetter(r)}>View</button>
                   <button className="btn secondary" type="button" onClick={() => downloadLetter(r)}>Download</button>
+                  {r.status === 'issued' ? (
+                    <button className="btn" type="button" onClick={() => createLogin(r)}>Create login</button>
+                  ) : (
+                    <button className="btn" type="button" onClick={() => resetLogin(r)}>Show /reset login</button>
+                  )}
                 </div>
               ),
             },
@@ -222,6 +306,8 @@ export function OffersPage() {
           }}
         />
       ) : null}
+
+      {creds ? <CredentialsModal creds={creds} onClose={() => setCreds(null)} /> : null}
     </PageShell>
   );
 }

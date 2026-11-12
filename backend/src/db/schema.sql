@@ -294,3 +294,5 @@ CREATE TABLE IF NOT EXISTS offer_letters (
   created_by TEXT REFERENCES employees(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE;

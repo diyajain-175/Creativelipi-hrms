@@ -1,4 +1,4 @@
-import { login, sessionProfile } from '../services/auth.service.js';
+import { login, sessionProfile, changePassword } from '../services/auth.service.js';
 import { postgresUserRepo as userRepo } from '../repositories/postgres/user.repository.js';
 import { requireFields } from '../middleware/validate.js';
 import { env } from '../config/env.js';
@@ -47,6 +47,22 @@ export async function meHandler(req, res, next) {
     const profile = await sessionProfile(user);
 
     res.json({ user: profile });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function changePasswordHandler(req, res, next) {
+  try {
+    requireFields(req.body, ['currentPassword', 'newPassword']);
+
+    await changePassword(
+      req.user.id,
+      req.body.currentPassword,
+      req.body.newPassword
+    );
+
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }

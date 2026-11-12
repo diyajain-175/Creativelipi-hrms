@@ -8,7 +8,9 @@ import {
   loginHandler,
   logoutHandler,
   meHandler,
+  changePasswordHandler,
 } from '../controllers/auth.controller.js';
+import { forbidden } from '../utils/errors.js';
 
 import * as employees from '../services/employee.service.js';
 import * as profile from '../services/profile.service.js';
@@ -29,8 +31,17 @@ const router = Router();
 router.post('/auth/login', wrap(loginHandler));
 router.post('/auth/logout', logoutHandler);
 router.get('/auth/me', requireAuth, wrap(meHandler));
+router.post('/auth/change-password', requireAuth, wrap(changePasswordHandler));
 
 router.use(requireAuth);
+
+router.use((req, _res, next) => {
+  if (req.user.mustChangePassword) {
+    return next(forbidden('Please change your temporary password first.'));
+  }
+
+  next();
+});
 
 router.get('/dashboard', wrap(async (req, res) => {
   res.json(await dashboard.buildDashboard(req.user));
@@ -458,6 +469,20 @@ router.get(
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
     res.send(buffer);
+  })
+);
+router.post(
+  '/offers/:id/create-login',
+  requirePermission(P.EMPLOYEES_WRITE),
+  wrap(async (req, res) => {
+    res.status(201).json(await offers.createLogin(req.user, req.params.id));
+  })
+);
+router.post(
+  '/offers/:id/reset-login',
+  requirePermission(P.EMPLOYEES_WRITE),
+  wrap(async (req, res) => {
+    res.json(await offers.resetLogin(req.user, req.params.id));
   })
 );
 
